@@ -1,0 +1,38 @@
+# Worker service for background tasks
+FROM python:3.11-slim as builder
+
+WORKDIR /build
+
+RUN apt-get update && apt-get install -y \
+    gcc g++ build-essential libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+RUN pip wheel --no-cache-dir --wheel-dir /wheels -r requirements.txt
+
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    C_FORCE_ROOT=1
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /wheels /wheels
+RUN pip install --no-cache-dir --no-index --find-links=/wheels /wheels/*
+
+RUN groupadd -r oasis && useradd -r -g oasis oasis
+
+COPY --chown=oasis:oasis ./src /app/src
+COPY --chown=oasis:oasis ./config /app/config
+
+RUN mkdir -p /app/logs && chown -R oasis:oasis /app/logs
+
+USER oasis
+
+CMD ["celery", "-A", "src.workers.celery_app", "worker", "--loglevel=info", "--concurrency=4"]
