@@ -1,0 +1,395 @@
+# ==================== prometheus.yml ====================
+# Prometheus configuration for Oasis Trading System
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: 'oasis-trading'
+    environment: 'production'
+
+# Alertmanager configuration
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - alertmanager:9093
+
+# Load rules once and periodically evaluate them
+rule_files:
+  - "/etc/prometheus/alerts/*.yml"
+
+# Scrape configurations
+scrape_configs:
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+        labels:
+          service: 'prometheus'
+
+  # API service metrics
+  - job_name: 'oasis-api'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['api:8000']
+        labels:
+          service: 'api'
+          component: 'backend'
+    scrape_interval: 10s
+
+  # Worker service metrics
+  - job_name: 'oasis-worker'
+    static_configs:
+      - targets: ['worker:9090']
+        labels:
+          service: 'worker'
+          component: 'backend'
+
+  # PostgreSQL exporter
+  - job_name: 'postgres'
+    static_configs:
+      - targets: ['postgres-exporter:9187']
+        labels:
+          service: 'postgres'
+          component: 'database'
+
+  # Redis exporter
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis-exporter:9121']
+        labels:
+          service: 'redis'
+          component: 'cache'
+
+  # Kafka exporter
+  - job_name: 'kafka'
+    static_configs:
+      - targets: ['kafka-exporter:9308']
+        labels:
+          service: 'kafka'
+          component: 'messaging'
+
+  # Node exporter for system metrics
+  - job_name: 'node'
+    static_configs:
+      - targets: ['node-exporter:9100']
+        labels:
+          service: 'node'
+          component: 'system'
+
+  # Kubernetes metrics
+  - job_name: 'kubernetes-apiservers'
+    kubernetes_sd_configs:
+      - role: endpoints
+    scheme: https
+    tls_config:
+      ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+    bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+        action: keep
+        regex: default;kubernetes;https
+
+  - job_name: 'kubernetes-nodes'
+    kubernetes_sd_configs:
+      - role: node
+    scheme: https
+    tls_config:
+      ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+    bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+    relabel_configs:
+      - action: labelmap
+        regex: __meta_kubernetes_node_label_(.+)
+
+  - job_name: 'kubernetes-pods'
+    kubernetes_sd_configs:
+      - role: pod
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+        action: keep
+        regex: true
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+        action: replace
+        target_label: __metrics_path__
+        regex: (.+)
+      - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+        action: replace
+        regex: ([^:]+)(?::\d+)?;(\d+)
+        replacement: $1:$2
+        target_label: __address__
+      - action: labelmap
+        regex: __meta_kubernetes_pod_label_(.+)
+      - source_labels: [__meta_kubernetes_namespace]
+        action: replace
+        target_label: kubernetes_namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        action: replace
+        target_label: kubernetes_pod_name
+
+---
+# ==================== alerts.yml ====================
+# Alert rules for Oasis Trading System
+
+groups:
+  - name: oasis_trading_alerts
+    interval: 30s
+    rules:
+      # High Error Rate Alert
+      - alert: HighErrorRate
+        expr: rate(http_requests_total{status=~"5.."}[5m]) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+          component: api
+        annotations:
+          summary: "High error rate detected"
+          description: "Error rate is {{ $value | humanizePercentage }} for {{ $labels.instance }}"
+
+      # API Latency Alert
+      - alert: HighAPILatency
+        expr: histogram_quantile(0.99, rate(http_request_duration_seconds_bucket[5m])) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+          component: api
+        annotations:
+          summary: "High API latency detected"
+          description: "99th percentile latency is {{ $value }}s for {{ $labels.instance }}"
+
+      # Database Connection Alert
+      - alert: DatabaseConnectionFailure
+        expr: up{job="postgres"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: database
+        annotations:
+          summary: "Database connection failed"
+          description: "Cannot connect to PostgreSQL database"
+
+      # Redis Connection Alert
+      - alert: RedisConnectionFailure
+        expr: up{job="redis"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: cache
+        annotations:
+          summary: "Redis connection failed"
+          description: "Cannot connect to Redis cache"
+
+      # High Memory Usage
+      - alert: HighMemoryUsage
+        expr: (node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) / node_memory_MemTotal_bytes > 0.9
+        for: 5m
+        labels:
+          severity: warning
+          component: system
+        annotations:
+          summary: "High memory usage detected"
+          description: "Memory usage is {{ $value | humanizePercentage }} on {{ $labels.instance }}"
+
+      # High CPU Usage
+      - alert: HighCPUUsage
+        expr: 100 - (avg by(instance) (irate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80
+        for: 5m
+        labels:
+          severity: warning
+          component: system
+        annotations:
+          summary: "High CPU usage detected"
+          description: "CPU usage is {{ $value }}% on {{ $labels.instance }}"
+
+      # Trading Specific Alerts
+      - alert: TradingStrategyFailure
+        expr: increase(trading_strategy_errors_total[5m]) > 5
+        for: 1m
+        labels:
+          severity: critical
+          component: trading
+        annotations:
+          summary: "Trading strategy experiencing errors"
+          description: "Strategy {{ $labels.strategy_name }} has {{ $value }} errors in last 5 minutes"
+
+      - alert: HighDrawdown
+        expr: trading_portfolio_drawdown_percent > 10
+        for: 1m
+        labels:
+          severity: critical
+          component: risk
+        annotations:
+          summary: "High portfolio drawdown detected"
+          description: "Portfolio drawdown is {{ $value }}%"
+
+      - alert: RiskLimitExceeded
+        expr: trading_risk_limit_exceeded == 1
+        for: 1m
+        labels:
+          severity: critical
+          component: risk
+        annotations:
+          summary: "Risk limit exceeded"
+          description: "Risk limit exceeded for {{ $labels.limit_type }}"
+
+      - alert: ExchangeAPIFailure
+        expr: up{job="exchange_api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: exchange
+        annotations:
+          summary: "Exchange API connection failed"
+          description: "Cannot connect to {{ $labels.exchange }} API"
+
+      # Kafka Alerts
+      - alert: KafkaConsumerLag
+        expr: kafka_consumer_lag > 1000
+        for: 5m
+        labels:
+          severity: warning
+          component: messaging
+        annotations:
+          summary: "High Kafka consumer lag"
+          description: "Consumer lag is {{ $value }} for topic {{ $labels.topic }}"
+
+---
+# ==================== grafana-dashboard.json ====================
+{
+  "dashboard": {
+    "title": "Oasis Trading System Dashboard",
+    "panels": [
+      {
+        "title": "API Request Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(http_requests_total[5m])",
+            "legendFormat": "{{method}} {{endpoint}}"
+          }
+        ]
+      },
+      {
+        "title": "API Latency (P99)",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.99, rate(http_request_duration_seconds_bucket[5m]))",
+            "legendFormat": "P99 Latency"
+          }
+        ]
+      },
+      {
+        "title": "Trading Performance",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "trading_portfolio_value",
+            "legendFormat": "Portfolio Value"
+          },
+          {
+            "expr": "trading_total_pnl",
+            "legendFormat": "Total P&L"
+          }
+        ]
+      },
+      {
+        "title": "Active Positions",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "trading_active_positions"
+          }
+        ]
+      },
+      {
+        "title": "Win Rate",
+        "type": "gauge",
+        "targets": [
+          {
+            "expr": "trading_win_rate_percent"
+          }
+        ]
+      },
+      {
+        "title": "System Resources",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "100 - (avg by(instance) (irate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100)",
+            "legendFormat": "CPU Usage %"
+          },
+          {
+            "expr": "(node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) / node_memory_MemTotal_bytes * 100",
+            "legendFormat": "Memory Usage %"
+          }
+        ]
+      },
+      {
+        "title": "Database Connections",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "pg_stat_activity_count",
+            "legendFormat": "Active Connections"
+          }
+        ]
+      },
+      {
+        "title": "Redis Operations",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(redis_commands_processed_total[5m])",
+            "legendFormat": "Commands/sec"
+          }
+        ]
+      },
+      {
+        "title": "Kafka Messages",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(kafka_topic_partition_current_offset[5m])",
+            "legendFormat": "{{topic}}"
+          }
+        ]
+      },
+      {
+        "title": "Exchange API Latency",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "exchange_api_latency_seconds",
+            "legendFormat": "{{exchange}}"
+          }
+        ]
+      },
+      {
+        "title": "Risk Metrics",
+        "type": "table",
+        "targets": [
+          {
+            "expr": "trading_var_95"
+          },
+          {
+            "expr": "trading_max_drawdown_percent"
+          },
+          {
+            "expr": "trading_sharpe_ratio"
+          }
+        ]
+      },
+      {
+        "title": "Strategy Performance",
+        "type": "table",
+        "targets": [
+          {
+            "expr": "trading_strategy_pnl",
+            "format": "table"
+          }
+        ]
+      }
+    ]
+  }
+}

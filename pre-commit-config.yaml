@@ -1,0 +1,220 @@
+# Pre-commit hooks for code quality and security
+# Install: pre-commit install
+# Run manually: pre-commit run --all-files
+
+default_language_version:
+  python: python3.11
+
+repos:
+  # General hooks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: ^docs/
+      - id: end-of-file-fixer
+        exclude: ^docs/
+      - id: check-yaml
+        args: ['--unsafe']
+      - id: check-json
+      - id: check-toml
+      - id: check-xml
+      - id: check-added-large-files
+        args: ['--maxkb=1000']
+      - id: check-case-conflict
+      - id: check-merge-conflict
+      - id: check-symlinks
+      - id: check-executables-have-shebangs
+      - id: check-shebang-scripts-are-executable
+      - id: debug-statements
+      - id: detect-private-key
+      - id: mixed-line-ending
+        args: ['--fix=lf']
+      - id: requirements-txt-fixer
+      - id: fix-byte-order-marker
+      - id: check-docstring-first
+      - id: check-ast
+
+  # Python code formatting - Black
+  - repo: https://github.com/psf/black
+    rev: 23.12.1
+    hooks:
+      - id: black
+        language_version: python3.11
+        args: ['--line-length=100']
+        exclude: ^(migrations/|docs/)
+
+  # Python imports sorting - isort
+  - repo: https://github.com/pycqa/isort
+    rev: 5.13.2
+    hooks:
+      - id: isort
+        args: ['--profile', 'black', '--line-length', '100']
+        exclude: ^(migrations/|docs/)
+
+  # Python linting - Flake8
+  - repo: https://github.com/pycqa/flake8
+    rev: 7.0.0
+    hooks:
+      - id: flake8
+        args: [
+          '--max-line-length=100',
+          '--ignore=E203,E266,E501,W503,F403,F401',
+          '--max-complexity=10',
+          '--select=B,C,E,F,W,T4,B9'
+        ]
+        exclude: ^(migrations/|docs/|tests/)
+        additional_dependencies: [
+          'flake8-bugbear',
+          'flake8-comprehensions',
+          'flake8-simplify',
+        ]
+
+  # Python type checking - MyPy
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.8.0
+    hooks:
+      - id: mypy
+        args: [
+          '--ignore-missing-imports',
+          '--disallow-untyped-defs',
+          '--no-implicit-optional',
+          '--warn-redundant-casts',
+          '--warn-unused-ignores',
+          '--warn-no-return',
+        ]
+        exclude: ^(migrations/|docs/|tests/)
+        additional_dependencies: [
+          'types-requests',
+          'types-PyYAML',
+          'types-python-dateutil',
+        ]
+
+  # Security checks - Bandit
+  - repo: https://github.com/pycqa/bandit
+    rev: 1.7.6
+    hooks:
+      - id: bandit
+        args: ['-r', 'src', '-f', 'json', '-ll']
+        exclude: ^(tests/|docs/)
+
+  # Docstring checks
+  - repo: https://github.com/pycqa/pydocstyle
+    rev: 6.3.0
+    hooks:
+      - id: pydocstyle
+        exclude: ^(migrations/|tests/|docs/)
+        args: [
+          '--convention=google',
+          '--add-ignore=D100,D101,D102,D103,D104,D105,D106,D107'
+        ]
+
+  # YAML formatting
+  - repo: https://github.com/pre-commit/mirrors-prettier
+    rev: v3.1.0
+    hooks:
+      - id: prettier
+        types_or: [yaml, json]
+        exclude: ^(docs/|package-lock.json)
+
+  # Dockerfile linting
+  - repo: https://github.com/hadolint/hadolint
+    rev: v2.12.0
+    hooks:
+      - id: hadolint-docker
+        args: ['--ignore', 'DL3008', '--ignore', 'DL3009']
+
+  # Shell script checks
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.9.0.6
+    hooks:
+      - id: shellcheck
+        args: ['--severity=warning']
+
+  # SQL formatting
+  - repo: https://github.com/sqlfluff/sqlfluff
+    rev: 3.0.5
+    hooks:
+      - id: sqlfluff-lint
+        args: ['--dialect', 'postgres']
+        files: \.(sql)$
+      - id: sqlfluff-fix
+        args: ['--dialect', 'postgres']
+        files: \.(sql)$
+
+  # Markdown linting
+  - repo: https://github.com/igorshubovych/markdownlint-cli
+    rev: v0.38.0
+    hooks:
+      - id: markdownlint
+        args: ['--fix']
+        exclude: ^(CHANGELOG.md)
+
+  # Git commit message linting
+  - repo: https://github.com/jorisroovers/gitlint
+    rev: v0.19.1
+    hooks:
+      - id: gitlint
+        args: ['--config', '.gitlint']
+
+  # Secrets detection
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.4.0
+    hooks:
+      - id: detect-secrets
+        args: ['--baseline', '.secrets.baseline']
+        exclude: ^(poetry.lock|package-lock.json|.*/test_data/)
+
+  # Python dependencies check
+  - repo: https://github.com/Lucas-C/pre-commit-hooks-safety
+    rev: v1.3.3
+    hooks:
+      - id: python-safety-dependencies-check
+        files: requirements.*\.txt$
+
+  # License headers
+  - repo: https://github.com/Lucas-C/pre-commit-hooks
+    rev: v1.5.4
+    hooks:
+      - id: insert-license
+        files: \.py$
+        exclude: ^(docs/|migrations/)
+        args: [
+          '--license-filepath', 'LICENSE-header.txt',
+          '--comment-style', '#'
+        ]
+
+# Custom local hooks
+  - repo: local
+    hooks:
+      # Check for print statements
+      - id: no-print-statements
+        name: No print statements
+        entry: '\bprint\('
+        language: pygrep
+        types: [python]
+        exclude: ^(scripts/|notebooks/|tests/)
+      
+      # Check for TODO comments
+      - id: no-todo-comments
+        name: No TODO comments in production code
+        entry: '(TODO|FIXME|XXX)'
+        language: pygrep
+        types: [python]
+        exclude: ^(tests/|docs/|scripts/)
+        pass_filenames: true
+      
+      # Ensure __init__.py files exist
+      - id: check-init-py
+        name: Check for __init__.py files
+        entry: scripts/check_init_py.sh
+        language: script
+        pass_filenames: false
+      
+      # Run tests on commit
+      - id: run-tests
+        name: Run unit tests
+        entry: pytest tests/unit --tb=short -q
+        language: system
+        pass_filenames: false
+        stages: [push]
