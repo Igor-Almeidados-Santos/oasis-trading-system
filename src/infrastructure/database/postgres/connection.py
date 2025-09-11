@@ -30,7 +30,7 @@ from sqlalchemy.pool import NullPool, QueuePool
 import uuid
 
 from src.config.settings import settings
-from src.infrastructure.logging_config import get_logger
+from src.infrastructure.monitoring.logging_config import get_logger
 
 logger = get_logger(__name__)
 

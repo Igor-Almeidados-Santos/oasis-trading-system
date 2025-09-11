@@ -1,4 +1,3 @@
--- ==================== scripts/sql/init.sql ====================
 -- Oasis Trading System Database Initialization Script
 
 -- Create database if not exists

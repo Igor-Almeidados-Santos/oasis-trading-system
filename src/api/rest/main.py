@@ -21,8 +21,8 @@ import sentry_sdk
 from sentry_sdk.integrations.asgi import SentryAsgiMiddleware
 
 from src.config.settings import settings
-from src.infrastructure.database.connection import init_database, close_database
-from src.infrastructure.logging_config import get_logger
+from src.infrastructure.database.postgres.connection import init_database, close_database
+from src.infrastructure.monitoring.logging_config import get_logger
 
 logger = get_logger(__name__)
 
@@ -295,7 +295,7 @@ def create_application() -> FastAPI:
     @app.get("/ready", tags=["System"])
     async def readiness_check() -> Dict[str, Any]:
         """Readiness check endpoint"""
-        from src.infrastructure.database.connection import db_manager
+        from src.infrastructure.database.postgres.connection import db_manager
         
         # Check database
         db_health = await db_manager.health_check()

@@ -1,4 +1,3 @@
-
 # ML service with GPU support
 FROM nvidia/cuda:12.0-cudnn8-runtime-ubuntu22.04 as builder
 
