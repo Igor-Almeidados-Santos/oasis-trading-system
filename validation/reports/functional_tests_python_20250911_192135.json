@@ -1,0 +1,91 @@
+{
+  "functional_tests_python": {
+    "timestamp": "2025-09-11T19:21:35.620662",
+    "summary": {
+      "total": 13,
+      "passed": 13,
+      "failed": 0,
+      "success_rate": "100.0%"
+    },
+    "tests": [
+      {
+        "test": "Standard Library Imports",
+        "passed": true,
+        "details": "",
+        "timestamp": "2025-09-11T19:21:35.609146"
+      },
+      {
+        "test": "Source Path Addition",
+        "passed": true,
+        "details": "",
+        "timestamp": "2025-09-11T19:21:35.614510"
+      },
+      {
+        "test": "File: requirements.txt",
+        "passed": true,
+        "details": "",
+        "timestamp": "2025-09-11T19:21:35.614510"
+      },
+      {
+        "test": "File: setup.py",
+        "passed": true,
+        "details": "",
+        "timestamp": "2025-09-11T19:21:35.614510"
+      },
+      {
+        "test": "File: .env.example",
+        "passed": true,
+        "details": "",
+        "timestamp": "2025-09-11T19:21:35.614510"
+      },
+      {
+        "test": "File: README.md",
+        "passed": true,
+        "details": "",
+        "timestamp": "2025-09-11T19:21:35.614510"
+      },
+      {
+        "test": "Directory: src",
+        "passed": true,
+        "details": "",
+        "timestamp": "2025-09-11T19:21:35.614510"
+      },
+      {
+        "test": "Directory: src/config",
+        "passed": true,
+        "details": "",
+        "timestamp": "2025-09-11T19:21:35.614510"
+      },
+      {
+        "test": "Directory: src/infrastructure",
+        "passed": true,
+        "details": "",
+        "timestamp": "2025-09-11T19:21:35.619605"
+      },
+      {
+        "test": "Directory: tests",
+        "passed": true,
+        "details": "",
+        "timestamp": "2025-09-11T19:21:35.619605"
+      },
+      {
+        "test": "Environment Variables",
+        "passed": true,
+        "details": "",
+        "timestamp": "2025-09-11T19:21:35.620662"
+      },
+      {
+        "test": "Python Version",
+        "passed": true,
+        "details": "Python 3.11",
+        "timestamp": "2025-09-11T19:21:35.620662"
+      },
+      {
+        "test": "Virtual Environment",
+        "passed": true,
+        "details": "Active virtual environment detected",
+        "timestamp": "2025-09-11T19:21:35.620662"
+      }
+    ]
+  }
+}
