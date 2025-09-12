@@ -4,6 +4,7 @@
 
 ![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.11+-green.svg)
+![Poetry](https://img.shields.io/badge/poetry-1.6+-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-purple.svg)
 ![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)
 ![Coverage](https://img.shields.io/badge/coverage-85%25-yellowgreen.svg)
@@ -55,6 +56,7 @@ O Oasis Trading System é uma plataforma de trading algorítmico de criptomoedas
 
 ### Backend
 - **Core**: Python 3.11+ com AsyncIO
+- **Gerenciador**: Poetry para dependências
 - **API**: FastAPI, GraphQL
 - **Database**: PostgreSQL + TimescaleDB
 - **Cache**: Redis Cluster
@@ -77,12 +79,26 @@ O Oasis Trading System é uma plataforma de trading algorítmico de criptomoedas
 
 ### Pré-requisitos
 - Python 3.11+
+- [Poetry](https://python-poetry.org/docs/#installation) 1.6+
 - Docker & Docker Compose
 - Node.js 18+
 - PostgreSQL 14+
 - Redis 7+
 
-### Setup com Docker
+### Instalação do Poetry
+
+```bash
+# Linux/macOS/Windows (WSL)
+curl -sSL https://install.python-poetry.org | python3 -
+
+# Ou via pip
+pip install poetry
+
+# Verifique a instalação
+poetry --version
+```
+
+### Setup com Poetry
 
 ```bash
 # Clone o repositório
@@ -93,38 +109,34 @@ cd oasis-trading-system
 cp .env.example .env
 # Edit .env com suas configurações
 
-# Build e inicie os containers
-docker-compose up -d
+# Setup completo com Poetry
+make setup
 
-# Execute as migrações
-docker-compose exec api python scripts/migration/migrate_up.py
+# Ou manualmente:
+poetry install --with=dev,docs
+poetry run pre-commit install
+
+# Ative o ambiente virtual
+poetry shell
+
+# Inicie os serviços
+make up
 
 # Acesse o dashboard
 open http://localhost:3000
 ```
 
-### Setup Manual
+### Setup com Docker
 
 ```bash
-# Crie o ambiente virtual
-python -m venv venv
-source venv/bin/activate  # Linux/Mac
-# ou
-venv\Scripts\activate  # Windows
+# Build e inicie os containers
+docker-compose up -d
 
-# Instale as dependências
-pip install -r requirements.txt
+# Execute as migrações
+docker-compose exec api poetry run python scripts/migration/migrate_up.py
 
-# Configure o banco de dados
-python scripts/setup_database.py
-
-# Inicie o servidor API
-uvicorn src.api.rest.main:app --reload --host 0.0.0.0 --port 8000
-
-# Em outro terminal, inicie o frontend
-cd frontend
-npm install
-npm run dev
+# Acesse o dashboard
+open http://localhost:3000
 ```
 
 ## 🎯 Uso Básico
@@ -144,7 +156,7 @@ strategy = MomentumStrategy(
 )
 
 # Execute backtesting
-results = strategy.backtest(
+results = await strategy.backtest(
     start_date="2023-01-01",
     end_date="2023-12-31",
     initial_capital=10000
@@ -152,6 +164,30 @@ results = strategy.backtest(
 
 print(f"ROI: {results.roi}%")
 print(f"Sharpe Ratio: {results.sharpe_ratio}")
+```
+
+### Comandos Poetry Essenciais
+
+```bash
+# Gerenciamento de dependências
+poetry add fastapi                    # Adicionar dependência
+poetry add --group=dev pytest        # Adicionar dependência de desenvolvimento
+poetry remove package-name           # Remover dependência
+poetry update                        # Atualizar todas as dependências
+poetry show                          # Mostrar dependências instaladas
+poetry show --tree                   # Mostrar árvore de dependências
+
+# Ambiente virtual
+poetry shell                         # Ativar shell do ambiente virtual
+poetry run python script.py         # Executar comando no ambiente virtual
+poetry env info                      # Informações do ambiente virtual
+
+# Build e publicação
+poetry build                         # Construir pacote
+poetry publish --dry-run            # Testar publicação
+
+# Exportar requirements (para Docker)
+poetry export -f requirements.txt --output requirements.txt --without-hashes
 ```
 
 ### API REST Example
@@ -215,18 +251,23 @@ curl -X POST http://localhost:8000/api/v1/orders \
 
 ```bash
 # Executar todos os testes
-pytest
+make test
 
 # Testes com coverage
-pytest --cov=src tests/
+make test-cov
 
 # Testes específicos
-pytest tests/unit/core/
-pytest tests/integration/
-pytest tests/e2e/
+make test-unit
+make test-integration
+make test-e2e
 
-# Testes de performance
-python tests/performance/latency_test.py
+# Testes em modo watch
+make test-watch
+
+# Usando Poetry diretamente
+poetry run pytest
+poetry run pytest --cov=src
+poetry run pytest tests/unit/
 ```
 
 ## 📈 Monitoring
@@ -251,9 +292,76 @@ python tests/performance/latency_test.py
 - 📝 Audit logs completos
 - 🚫 Princípio do menor privilégio
 
+## 📚 Comandos Make Disponíveis
+
+```bash
+# Setup & Installation
+make setup              # Setup inicial completo
+make install            # Instalar dependências
+make install-dev        # Instalar com dependências de desenvolvimento
+make update             # Atualizar dependências
+
+# Development
+make run-api            # Executar API server
+make run-worker         # Executar Celery worker
+make jupyter            # Executar Jupyter notebook
+make shell              # Ativar Poetry shell
+
+# Code Quality
+make lint               # Executar linters
+make format             # Formatar código
+make type-check         # Verificação de tipos
+make security           # Verificações de segurança
+make pre-commit         # Executar hooks pre-commit
+
+# Testing
+make test               # Executar todos os testes
+make test-unit          # Testes unitários
+make test-integration   # Testes de integração
+make test-cov           # Testes com coverage
+
+# Docker
+make build              # Build das imagens Docker
+make up                 # Subir todos os serviços
+make down               # Parar todos os serviços
+make logs               # Ver logs dos serviços
+
+# Database
+make db-migrate         # Executar migrações
+make db-seed            # Popular banco com dados de exemplo
+make db-reset           # Reset completo do banco
+
+# Documentation
+make docs               # Build documentação
+make docs-serve         # Servir documentação localmente
+
+# Utilities
+make clean              # Limpar arquivos gerados
+make version            # Mostrar versão
+make env                # Mostrar informações do ambiente
+```
+
 ## 🤝 Contribuindo
 
 Veja [CONTRIBUTING.md](./CONTRIBUTING.md) para detalhes sobre nosso código de conduta e processo de submissão de pull requests.
+
+### Configuração de Desenvolvimento
+
+```bash
+# Clone e setup
+git clone <repo-url>
+cd oasis-trading-system
+make setup
+
+# Instalar hooks de pre-commit
+poetry run pre-commit install
+
+# Executar testes antes de commits
+make test-cov
+
+# Verificar qualidade do código
+make lint
+```
 
 ## 📝 Licença
 
@@ -261,6 +369,7 @@ Este projeto está licenciado sob a MIT License - veja [LICENSE](./LICENSE) para
 
 ## 🙏 Agradecimentos
 
+- Poetry pela excelente gestão de dependências
 - CCXT pela excelente biblioteca de integração
 - TradingView pelos charts
 - Comunidade open-source de trading algorítmico
@@ -271,8 +380,18 @@ Este projeto está licenciado sob a MIT License - veja [LICENSE](./LICENSE) para
 - 💬 Discord: [Join our server](https://discord.gg/oasis)
 - 📚 Docs: [documentation.oasis-trading.com](https://documentation.oasis-trading.com)
 
+## ⚡ Quick Start
+
+```bash
+# One-liner setup
+curl -sSL https://raw.githubusercontent.com/oasis-trading/oasis-trading-system/main/scripts/quick-setup.sh | bash
+
+# Ou setup manual
+git clone <repo> && cd oasis-trading-system && make setup && make up
+```
+
 ---
 
 <div align="center">
-Built with ❤️ by the Oasis Team
+Built with ❤️ by the Oasis Team using Poetry
 </div>

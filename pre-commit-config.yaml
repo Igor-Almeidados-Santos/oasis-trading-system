@@ -1,6 +1,6 @@
-# Pre-commit hooks for code quality and security
-# Install: pre-commit install
-# Run manually: pre-commit run --all-files
+# Pre-commit hooks for code quality and security (Poetry)
+# Install: poetry run pre-commit install
+# Run manually: poetry run pre-commit run --all-files
 
 default_language_version:
   python: python3.11
@@ -30,10 +30,21 @@ repos:
       - id: detect-private-key
       - id: mixed-line-ending
         args: ['--fix=lf']
-      - id: requirements-txt-fixer
       - id: fix-byte-order-marker
       - id: check-docstring-first
       - id: check-ast
+
+  # Poetry-specific hooks
+  - repo: https://github.com/python-poetry/poetry
+    rev: '1.6.1'
+    hooks:
+      - id: poetry-check
+        name: Poetry Check
+        description: Validates the structure of the pyproject.toml file
+        entry: poetry check
+        language: system
+        files: pyproject\.toml$
+        pass_filenames: false
 
   # Python code formatting - Black
   - repo: https://github.com/psf/black
@@ -88,6 +99,7 @@ repos:
           'types-requests',
           'types-PyYAML',
           'types-python-dateutil',
+          'types-redis',
         ]
 
   # Security checks - Bandit
@@ -165,13 +177,6 @@ repos:
         args: ['--baseline', '.secrets.baseline']
         exclude: ^(poetry.lock|package-lock.json|.*/test_data/)
 
-  # Python dependencies check
-  - repo: https://github.com/Lucas-C/pre-commit-hooks-safety
-    rev: v1.3.3
-    hooks:
-      - id: python-safety-dependencies-check
-        files: requirements.*\.txt$
-
   # License headers
   - repo: https://github.com/Lucas-C/pre-commit-hooks
     rev: v1.5.4
@@ -184,7 +189,7 @@ repos:
           '--comment-style', '#'
         ]
 
-# Custom local hooks
+# Custom local hooks using Poetry
   - repo: local
     hooks:
       # Check for print statements
@@ -211,10 +216,50 @@ repos:
         language: script
         pass_filenames: false
       
-      # Run tests on commit
-      - id: run-tests
-        name: Run unit tests
-        entry: pytest tests/unit --tb=short -q
+      # Check Poetry dependencies
+      - id: poetry-lock-check
+        name: Poetry lock file is up to date
+        entry: poetry lock --check
+        language: system
+        files: ^(pyproject\.toml|poetry\.lock)$
+        pass_filenames: false
+      
+      # Export requirements.txt for Docker
+      - id: poetry-export-requirements
+        name: Export requirements.txt
+        entry: poetry export -f requirements.txt --output requirements.txt --without-hashes
+        language: system
+        files: ^(pyproject\.toml|poetry\.lock)$
+        pass_filenames: false
+      
+      # Run tests on commit (fast subset)
+      - id: run-fast-tests
+        name: Run fast unit tests
+        entry: poetry run pytest tests/unit/test_config.py -v --tb=short -x
+        language: system
+        pass_filenames: false
+        stages: [commit]
+      
+      # Run all tests on push
+      - id: run-all-tests
+        name: Run all tests
+        entry: poetry run pytest tests/unit --tb=short -q --maxfail=3
         language: system
         pass_filenames: false
         stages: [push]
+      
+      # Security audit using Poetry
+      - id: poetry-audit
+        name: Poetry security audit
+        entry: poetry run safety check
+        language: system
+        pass_filenames: false
+        stages: [push]
+
+  # Ruff linter (modern Python linter)
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.1.8
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+      - id: ruff-format

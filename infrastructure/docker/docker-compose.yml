@@ -113,7 +113,7 @@ services:
       - oasis-network
 
   # ===========================================
-  # Application Services
+  # Application Services (Poetry)
   # ===========================================
   
   api:
@@ -140,9 +140,14 @@ services:
       SECRET_KEY: ${SECRET_KEY:-your-secret-key-here}
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-your-jwt-secret-key-here}
       SENTRY_DSN: ${SENTRY_DSN:-}
+      # Poetry specific environment
+      POETRY_NO_INTERACTION: 1
+      POETRY_CACHE_DIR: /tmp/poetry-cache
     volumes:
       - ./src:/app/src:ro
       - ./config:/app/config:ro
+      - ./pyproject.toml:/app/pyproject.toml:ro
+      - ./poetry.lock:/app/poetry.lock:ro
       - api_logs:/app/logs
     ports:
       - "${API_PORT:-8000}:8000"
@@ -179,9 +184,14 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       CELERY_BROKER_URL: redis://:${REDIS_PASSWORD:-redis_secure_password}@redis:6379/1
       CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD:-redis_secure_password}@redis:6379/2
+      # Poetry specific environment
+      POETRY_NO_INTERACTION: 1
+      POETRY_CACHE_DIR: /tmp/poetry-cache
     volumes:
       - ./src:/app/src:ro
       - ./config:/app/config:ro
+      - ./pyproject.toml:/app/pyproject.toml:ro
+      - ./poetry.lock:/app/poetry.lock:ro
       - worker_logs:/app/logs
     networks:
       - oasis-network
@@ -199,7 +209,7 @@ services:
     image: oasis-trading/worker:latest
     container_name: ots-scheduler
     restart: unless-stopped
-    command: ["celery", "-A", "src.workers.celery_app", "beat", "--loglevel=info"]
+    command: ["poetry", "run", "celery", "-A", "src.workers.celery_app", "beat", "--loglevel=info"]
     depends_on:
       - redis
       - worker
@@ -207,11 +217,46 @@ services:
       ENVIRONMENT: ${ENVIRONMENT:-development}
       CELERY_BROKER_URL: redis://:${REDIS_PASSWORD:-redis_secure_password}@redis:6379/1
       CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD:-redis_secure_password}@redis:6379/2
+      POETRY_NO_INTERACTION: 1
     volumes:
       - ./src:/app/src:ro
       - ./config:/app/config:ro
+      - ./pyproject.toml:/app/pyproject.toml:ro
+      - ./poetry.lock:/app/poetry.lock:ro
     networks:
       - oasis-network
+
+  # ===========================================
+  # ML Service (Poetry)
+  # ===========================================
+  
+  ml-service:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.ml
+    image: oasis-trading/ml:latest
+    container_name: ots-ml
+    restart: unless-stopped
+    depends_on:
+      - redis
+      - kafka
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-redis_secure_password}@redis:6379/0
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      ML_MODEL_PATH: /app/models
+      POETRY_NO_INTERACTION: 1
+    volumes:
+      - ./src:/app/src:ro
+      - ./models:/app/models
+      - ./pyproject.toml:/app/pyproject.toml:ro
+      - ./poetry.lock:/app/poetry.lock:ro
+      - ml_logs:/app/logs
+    ports:
+      - "8001:8001"
+    networks:
+      - oasis-network
+    profiles: ["ml"]
 
   # ===========================================
   # Monitoring Services
@@ -287,6 +332,28 @@ services:
     networks:
       - oasis-network
 
+  # Jupyter Notebook for development
+  jupyter:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.jupyter
+    container_name: ots-jupyter
+    restart: unless-stopped
+    profiles: ["dev"]
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./notebooks:/app/notebooks
+      - ./src:/app/src:ro
+      - ./data:/app/data
+      - ./pyproject.toml:/app/pyproject.toml:ro
+      - ./poetry.lock:/app/poetry.lock:ro
+    environment:
+      JUPYTER_TOKEN: ${JUPYTER_TOKEN:-oasis}
+      POETRY_NO_INTERACTION: 1
+    networks:
+      - oasis-network
+
   # ===========================================
   # Load Balancer / Reverse Proxy
   # ===========================================
@@ -347,6 +414,8 @@ volumes:
   api_logs:
     driver: local
   worker_logs:
+    driver: local
+  ml_logs:
     driver: local
   traefik_certs:
     driver: local

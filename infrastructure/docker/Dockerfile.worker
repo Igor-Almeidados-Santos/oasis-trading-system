@@ -1,38 +1,85 @@
-# Worker service for background tasks
+# ================================================
+# Oasis Trading System - Worker Service Dockerfile (Poetry)
+# ================================================
+
 FROM python:3.11-slim as builder
 
 WORKDIR /build
 
+# Install system dependencies
 RUN apt-get update && apt-get install -y \
-    gcc g++ build-essential libpq-dev \
+    gcc \
+    g++ \
+    build-essential \
+    libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel
-RUN pip wheel --no-cache-dir --wheel-dir /wheels -r requirements.txt
+# Install Poetry
+ENV POETRY_HOME="/opt/poetry" \
+    POETRY_VERSION=1.6.1
+RUN pip install poetry==$POETRY_VERSION
 
+# Copy Poetry files
+COPY pyproject.toml poetry.lock ./
+
+# Configure Poetry
+ENV POETRY_NO_INTERACTION=1 \
+    POETRY_VENV_IN_PROJECT=1 \
+    POETRY_CACHE_DIR=/opt/poetry-cache
+
+# Install dependencies
+RUN poetry config virtualenvs.create false \
+    && poetry install --only=main --no-root
+
+# Production stage
 FROM python:3.11-slim
 
+# Environment variables
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     C_FORCE_ROOT=1
 
 WORKDIR /app
 
+# Install runtime dependencies
 RUN apt-get update && apt-get install -y \
     libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /wheels /wheels
-RUN pip install --no-cache-dir --no-index --find-links=/wheels /wheels/*
+# Install Poetry
+ENV POETRY_HOME="/opt/poetry" \
+    POETRY_VERSION=1.6.1
+RUN pip install poetry==$POETRY_VERSION
 
+# Copy Poetry configuration
+COPY pyproject.toml poetry.lock ./
+
+# Configure Poetry for production
+ENV POETRY_NO_INTERACTION=1 \
+    POETRY_VENV_IN_PROJECT=1 \
+    POETRY_CACHE_DIR=/tmp/poetry-cache
+
+# Install dependencies
+RUN poetry config virtualenvs.create false \
+    && poetry install --only=main --no-root \
+    && rm -rf /tmp/poetry-cache
+
+# Create non-root user
 RUN groupadd -r oasis && useradd -r -g oasis oasis
 
+# Copy application code
 COPY --chown=oasis:oasis ./src /app/src
 COPY --chown=oasis:oasis ./config /app/config
 
+# Create necessary directories
 RUN mkdir -p /app/logs && chown -R oasis:oasis /app/logs
 
+# Switch to non-root user
 USER oasis
 
-CMD ["celery", "-A", "src.workers.celery_app", "worker", "--loglevel=info", "--concurrency=4"]
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD poetry run celery -A src.workers.celery_app inspect ping || exit 1
+
+# Default command
+CMD ["poetry", "run", "celery", "-A", "src.workers.celery_app", "worker", "--loglevel=info", "--concurrency=4"]

@@ -1,4 +1,4 @@
-name: CI/CD Pipeline
+name: CI/CD Pipeline (Poetry)
 
 on:
   push:
@@ -11,6 +11,7 @@ on:
 
 env:
   PYTHON_VERSION: '3.11'
+  POETRY_VERSION: '1.6.1'
   NODE_VERSION: '18'
   DOCKER_REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
@@ -34,28 +35,40 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
+      
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          version: ${{ env.POETRY_VERSION }}
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+          installer-parallel: true
+      
+      - name: Cache Poetry dependencies
+        uses: actions/cache@v3
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ env.PYTHON_VERSION }}-${{ hashFiles('poetry.lock') }}
+          restore-keys: |
+            venv-${{ runner.os }}-${{ env.PYTHON_VERSION }}-
       
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip setuptools wheel
-          pip install -r requirements.txt
-          pip install -r requirements-dev.txt
+        run: poetry install --with=dev
       
       - name: Run Black
-        run: black --check src tests
+        run: poetry run black --check src tests
       
       - name: Run isort
-        run: isort --check-only src tests
+        run: poetry run isort --check-only src tests
       
       - name: Run Flake8
-        run: flake8 src tests
+        run: poetry run flake8 src tests
       
       - name: Run MyPy
-        run: mypy src
+        run: poetry run mypy src
       
       - name: Run Bandit Security Check
-        run: bandit -r src -f json -o bandit-report.json
+        run: poetry run bandit -r src -f json -o bandit-report.json
       
       - name: Upload Bandit Report
         uses: actions/upload-artifact@v3
@@ -110,13 +123,25 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: ${{ matrix.python-version }}
-          cache: 'pip'
+      
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          version: ${{ env.POETRY_VERSION }}
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+          installer-parallel: true
+      
+      - name: Cache Poetry dependencies
+        uses: actions/cache@v3
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ matrix.python-version }}-${{ hashFiles('poetry.lock') }}
+          restore-keys: |
+            venv-${{ runner.os }}-${{ matrix.python-version }}-
       
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip setuptools wheel
-          pip install -r requirements.txt
-          pip install -r requirements-dev.txt
+        run: poetry install --with=dev
       
       - name: Run unit tests with coverage
         env:
@@ -124,7 +149,7 @@ jobs:
           REDIS_URL: redis://localhost:6379/0
           ENVIRONMENT: testing
         run: |
-          pytest tests/unit -v --cov=src --cov-report=xml --cov-report=term
+          poetry run pytest tests/unit -v --cov=src --cov-report=xml --cov-report=term
       
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v3
@@ -183,13 +208,23 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
+      
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          version: ${{ env.POETRY_VERSION }}
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+          installer-parallel: true
+      
+      - name: Cache Poetry dependencies
+        uses: actions/cache@v3
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ env.PYTHON_VERSION }}-${{ hashFiles('poetry.lock') }}
       
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip setuptools wheel
-          pip install -r requirements.txt
-          pip install -r requirements-dev.txt
+        run: poetry install --with=dev
       
       - name: Run integration tests
         env:
@@ -198,7 +233,7 @@ jobs:
           KAFKA_BOOTSTRAP_SERVERS: localhost:9092
           ENVIRONMENT: testing
         run: |
-          pytest tests/integration -v --maxfail=3
+          poetry run pytest tests/integration -v --maxfail=3
 
   # ===========================================
   # Build Docker Images
@@ -274,17 +309,20 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
+      
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          version: ${{ env.POETRY_VERSION }}
+          virtualenvs-create: true
+          virtualenvs-in-project: true
       
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip setuptools wheel
-          pip install -r requirements.txt
-          pip install -r requirements-dev.txt
+        run: poetry install --with=dev
       
       - name: Run performance tests
         run: |
-          pytest tests/performance -v --benchmark-only --benchmark-json=benchmark.json
+          poetry run pytest tests/performance -v --benchmark-only --benchmark-json=benchmark.json
       
       - name: Store benchmark result
         uses: benchmark-action/github-action-benchmark@v1
@@ -293,6 +331,49 @@ jobs:
           output-file-path: benchmark.json
           github-token: ${{ secrets.GITHUB_TOKEN }}
           auto-push: true
+
+  # ===========================================
+  # Dependency Audit
+  # ===========================================
+  
+  audit:
+    name: Dependency Audit
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          version: ${{ env.POETRY_VERSION }}
+      
+      - name: Check Poetry lock file
+        run: poetry lock --check
+      
+      - name: Export requirements for audit
+        run: |
+          poetry export -f requirements.txt --output requirements.txt
+          poetry export -f requirements.txt --with=dev --output requirements-dev.txt
+      
+      - name: Run Safety check
+        run: |
+          pip install safety
+          safety check -r requirements.txt
+      
+      - name: Upload requirements as artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: requirements
+          path: |
+            requirements.txt
+            requirements-dev.txt
 
   # ===========================================
   # Deploy to Staging
@@ -426,12 +507,16 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       
-      - name: Install MkDocs
-        run: |
-          pip install mkdocs mkdocs-material mkdocstrings[python]
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          version: ${{ env.POETRY_VERSION }}
+      
+      - name: Install dependencies
+        run: poetry install --with=docs
       
       - name: Build documentation
-        run: mkdocs build
+        run: poetry run mkdocs build
       
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v3
