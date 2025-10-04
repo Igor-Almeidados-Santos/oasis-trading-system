@@ -1,0 +1,15 @@
+[tool.poetry]
+name = "oasis-trading-system"
+version = "0.1.0"
+description = "Oasis Trading System Core Components"
+authors = ["Oasis Labs"]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+python-binance = "^1.0.19"
+python-dotenv = "^1.0.1"
+grpcio = "^1.60.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.1.1"
+grpcio-tools = "^1.60.0"

@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package trading_system;
+
+// Sinal bruto vindo da estratégia
+message TradingSignal {
+  string symbol = 1;
+  double quantity = 2;
+  double price = 3; // Preço de referência para cálculo de valor
+}
+
+// Requisição de ordem validada e pronta para envio
+message OrderRequest {
+    string symbol = 1;
+    double quantity = 2;
+    double price = 3;
+}
+
+// Resposta da execução
+message OrderResponse {
+    string order_id = 1;
+    string status = 2;
+}
+
+// Serviço de Risco: recebe sinais e os valida
+service RiskEngine {
+  rpc ProcessSignal(TradingSignal) returns (OrderResponse);
+}
+
+// Serviço de Execução: recebe ordens validadas e as envia
+service ExecutionService {
+    rpc PlaceLimitBuyOrder(OrderRequest) returns (OrderResponse);
+}

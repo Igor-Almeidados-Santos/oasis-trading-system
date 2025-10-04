@@ -1,0 +1,34 @@
+services:
+  order-executor:
+    build:
+      context: .
+      dockerfile: src/order_executor/Dockerfile
+    container_name: oasis_order_executor
+    env_file: .env
+    ports:
+      - "50052:50052"
+    volumes:
+      - ./src:/app/src
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "50052"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  risk-engine:
+    build:
+      context: .
+      dockerfile: src/risk_engine/Dockerfile
+    container_name: oasis_risk_engine
+    depends_on:
+      order-executor:
+        condition: service_healthy
+    env_file: .env
+    ports:
+      - "50051:50051"
+    volumes:
+      - ./src:/app/src
+      - ./demo_sprint2.py:/app/demo_sprint2.py
+    restart: unless-stopped
