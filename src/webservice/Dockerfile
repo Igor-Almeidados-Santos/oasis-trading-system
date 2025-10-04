@@ -11,4 +11,6 @@ RUN poetry config virtualenvs.create false && poetry install --no-root
 
 COPY . .
 
-CMD ["python", "-m", "src.risk_engine.service"]
+EXPOSE 8000
+
+CMD ["uvicorn", "src.webservice.service:app", "--host", "0.0.0.0", "--port", "8000"]

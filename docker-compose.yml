@@ -1,14 +1,35 @@
 services:
-  order-executor:
-    build:
-      context: .
-      dockerfile: src/order_executor/Dockerfile
-    container_name: oasis_order_executor
-    env_file: .env
-    ports:
-      - "50052:50052"
+  mongodb:
+    image: mongo:latest
+    container_name: oasis_mongodb
+    ports: ["27017:27017"]
+    volumes: [mongo_data:/data/db]
+    restart: unless-stopped
+
+  postgres-db:
+    image: postgres:15-alpine
+    container_name: oasis_postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports: ["5433:5432"]
     volumes:
-      - ./src:/app/src
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  order-executor:
+    build: { context: ., dockerfile: src/order_executor/Dockerfile }
+    container_name: oasis_order_executor
+    depends_on: { postgres-db: { condition: service_healthy } }
+    env_file: .env
+    ports: ["50052:50052"]
+    volumes: ["./src:/app/src"]
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "nc", "-z", "localhost", "50052"]
@@ -18,17 +39,65 @@ services:
       start_period: 10s
 
   risk-engine:
-    build:
-      context: .
-      dockerfile: src/risk_engine/Dockerfile
+    build: { context: ., dockerfile: src/risk_engine/Dockerfile }
     container_name: oasis_risk_engine
-    depends_on:
-      order-executor:
-        condition: service_healthy
+    depends_on: { order-executor: { condition: service_healthy } }
     env_file: .env
-    ports:
-      - "50051:50051"
-    volumes:
-      - ./src:/app/src
-      - ./demo_sprint2.py:/app/demo_sprint2.py
+    ports: ["50051:50051"]
+    volumes: ["./src:/app/src"]
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "50051"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  strategy-engine:
+    build: { context: ., dockerfile: src/strategy_engine/Dockerfile }
+    container_name: oasis_strategy_engine
+    depends_on: { risk-engine: { condition: service_healthy } }
+    env_file: .env
+    volumes: ["./src:/app/src"]
+    restart: unless-stopped
+
+  webservice:
+    build: { context: ., dockerfile: src/webservice/Dockerfile }
+    container_name: oasis_webservice
+    depends_on: { postgres-db: { condition: service_healthy }, mongodb: { condition: service_started } }
+    env_file: .env
+    ports: ["8000:8000"]
+    volumes: ["./src:/app/src"]
+    restart: unless-stopped
+    healthcheck: # ✅ CORREÇÃO
+      test: ["CMD", "nc", "-z", "localhost", "8000"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  telegram-bot:
+    build: { context: ., dockerfile: src/telegram_bot/Dockerfile }
+    container_name: oasis_telegram_bot
+    depends_on: { webservice: { condition: service_healthy } }
+    env_file: .env
+    volumes: ["./src:/app/src"]
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: oasis_frontend
+    ports: ["3000:3000"]
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      - WATCHPACK_POLLING=true
+    depends_on: [webservice]
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  mongo_data:

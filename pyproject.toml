@@ -3,13 +3,21 @@ name = "oasis-trading-system"
 version = "0.1.0"
 description = "Oasis Trading System Core Components"
 authors = ["Oasis Labs"]
+packages = [{include = "src"}]
 
 [tool.poetry.dependencies]
 python = "^3.11"
-# CORREÇÃO: Usando o nome oficial e correto do pacote: 'coinbase-advanced-py'
 coinbase-advanced-py = "^1.0.1"
 python-dotenv = "^1.0.1"
 grpcio = "^1.60.0"
+psycopg2-binary = "^2.9.9"
+fastapi = "^0.111.0"
+uvicorn = "^0.29.0"
+jinja2 = "^3.1.3"
+motor = "^3.4.0"
+python-telegram-bot = {version = "^21.0.1", extras = ["ext"]}
+httpx = "^0.27.0"
+websocket-client = "^1.7.0" # <-- ADICIONADO
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.1.1"

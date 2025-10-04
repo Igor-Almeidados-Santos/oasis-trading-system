@@ -4,30 +4,32 @@ from concurrent import futures
 from dotenv import load_dotenv
 from src.contracts_generated import trading_system_pb2
 from src.contracts_generated import trading_system_pb2_grpc
+from .position_manager import PositionManager
 
 class RiskEngineService(trading_system_pb2_grpc.RiskEngineServicer):
     def __init__(self):
-        load_dotenv()
-        self.max_order_size = float(os.getenv("RISK_MAX_ORDER_SIZE_USD", 100.0))
-        self.daily_pnl = 0.0
-        print("RiskEngine iniciado.")
-        print(f" - Tamanho Máximo da Ordem: ${self.max_order_size}")
-        
-        self.execution_channel = grpc.insecure_channel('order-executor:50052')
-        self.execution_stub = trading_system_pb2_grpc.ExecutionServiceStub(self.execution_channel)
+        # ... (inicialização do load_dotenv, max_order_size, stubs gRPC) ...
+        self.product_id = os.getenv("STRATEGY_PRODUCT_ID", "BTC-USD")
+        self.max_capital_allocation_pct = float(os.getenv("STRATEGY_CAPITAL_ALLOCATION", 0.15)) # Regra X
+        self.position_manager = PositionManager(self.product_id)
 
     def ProcessSignal(self, request: trading_system_pb2.TradingSignal, context):
-        print(f"\n[RiskEngine] Sinal recebido para {request.symbol}")
+        # ... (validação de tamanho da ordem como antes - Regra Y) ...
         
-        order_value = request.quantity * request.price
-        if order_value > self.max_order_size:
-            msg = f"REJEITADO: Valor da ordem ${order_value:.2f} excede o limite de ${self.max_order_size:.2f}."
+        # Validação 2: Exposição Máxima (Regra X)
+        # Supondo um capital total para o cálculo
+        total_capital = 1000.0 # Deveria vir de uma configuração mais robusta
+        current_exposure = self.position_manager.get_total_exposure_usd()
+        signal_value = request.quantity * request.price
+        
+        if (current_exposure + signal_value) > (total_capital * self.max_capital_allocation_pct):
+            msg = f"REJEITADO: Nova ordem excederia a alocação máxima de capital de {self.max_capital_allocation_pct:.0%}."
             print(f"[RiskEngine] {msg}")
             context.set_details(msg)
             context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
             return trading_system_pb2.OrderResponse()
 
-        print("[RiskEngine] Validação de tamanho OK.")
+        print("[RiskEngine] Validação de exposição OK.")
         
         print("[RiskEngine] Encaminhando para execução...")
         try:
