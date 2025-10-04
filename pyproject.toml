@@ -6,7 +6,8 @@ authors = ["Oasis Labs"]
 
 [tool.poetry.dependencies]
 python = "^3.11"
-python-binance = "^1.0.19"
+# CORREÇÃO: Usando o nome oficial e correto do pacote: 'coinbase-advanced-py'
+coinbase-advanced-py = "^1.0.1"
 python-dotenv = "^1.0.1"
 grpcio = "^1.60.0"
 
