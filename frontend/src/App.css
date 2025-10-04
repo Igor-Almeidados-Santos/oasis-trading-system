@@ -113,3 +113,22 @@ body {
 
 .value.positive { color: #16a34a; }
 .value.negative { color: #dc2626; }
+
+.loading-message, .error-message {
+  text-align: center;
+  font-size: 1.2em;
+  padding: 50px;
+  color: var(--text-secondary-color);
+}
+
+.error-message {
+  color: #dc2626;
+  background-color: #fef2f2;
+  border: 1px solid #fca5a5;
+  border-radius: 8px;
+}
+
+.status-indicator.stopped {
+  background-color: #fee2e2;
+  color: #991b1b;
+}

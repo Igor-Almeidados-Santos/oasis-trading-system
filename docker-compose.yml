@@ -69,27 +69,20 @@ services:
     ports: ["8000:8000"]
     volumes: ["./src:/app/src"]
     restart: unless-stopped
-    healthcheck: # ✅ CORREÇÃO
+    healthcheck:
       test: ["CMD", "nc", "-z", "localhost", "8000"]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 10s
-
-  telegram-bot:
-    build: { context: ., dockerfile: src/telegram_bot/Dockerfile }
-    container_name: oasis_telegram_bot
-    depends_on: { webservice: { condition: service_healthy } }
-    env_file: .env
-    volumes: ["./src:/app/src"]
-    restart: unless-stopped
-
+  
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
     container_name: oasis_frontend
-    ports: ["3000:3000"]
+    ports:
+      - "3000:5173" # ✅ CORREÇÃO DA PORTA
     volumes:
       - ./frontend:/app
       - /app/node_modules

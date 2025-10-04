@@ -1,6 +1,7 @@
 import os
 import uuid
-from coinbase.rest import RESTClient  
+from coinbase.rest import RESTClient  # ✅ Correção
+
 class CoinbaseClient:
     def __init__(self):
         self.execution_mode = os.getenv("EXECUTION_MODE", "PAPER").upper()
@@ -10,7 +11,7 @@ class CoinbaseClient:
             if not api_key or not private_key:
                 raise ValueError("Para o modo LIVE, as chaves de API da Coinbase são necessárias.")
             try:
-                self.client = RESTClient(api_key=api_key, api_secret=private_key) # ✅ CORREÇÃO
+                self.client = RESTClient(api_key=api_key, api_secret=private_key)
                 self.client.get_accounts()
                 print("Cliente Coinbase inicializado com sucesso em modo LIVE.")
             except Exception as e:
