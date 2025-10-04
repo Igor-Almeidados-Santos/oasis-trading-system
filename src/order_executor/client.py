@@ -1,49 +1,51 @@
 import os
 import uuid
-from coinbase.rest import Client
+from coinbase.rest import RESTClient  # ✅ Import correto!
 
 class CoinbaseClient:
     """
-    Encapsula toda a lógica de comunicação com a API da Coinbase Advanced Trade,
-    usando a biblioteca oficial 'coinbase-advanced-py'.
+    Encapsula toda a lógica de comunicação com a API da Coinbase Advanced Trade.
     """
     def __init__(self):
         api_key = os.getenv("COINBASE_API_KEY")
         private_key = os.getenv("COINBASE_PRIVATE_KEY")
+        
+        # Modo Mock para desenvolvimento sem credenciais válidas
+        self.mock_mode = os.getenv("USE_MOCK_EXCHANGE", "false").lower() == "true"
+        
+        if self.mock_mode:
+            print("⚠️  MODO MOCK ATIVADO - Simulando API da Coinbase")
+            self.client = None
+            return
 
         if not api_key or not private_key:
             raise ValueError("As variáveis COINBASE_API_KEY ou COINBASE_PRIVATE_KEY não foram encontradas.")
 
         try:
-            # A inicialização correta para a biblioteca 'coinbase-advanced-py'
-            self.client = Client(api_key=api_key, api_secret=private_key)
-            # Chamada de teste para validar as chaves na inicialização
-            self.client.get_accounts()
+            self.client = RESTClient(api_key=api_key, api_secret=private_key)
             print("Cliente Coinbase inicializado com sucesso.")
         except Exception as e:
-            print(f"ERRO CRÍTICO: Falha ao inicializar o cliente da Coinbase. Verifique suas chaves de API. Erro: {e}")
+            print(f"ERRO: Falha ao inicializar o cliente da Coinbase: {e}")
             raise
 
     def create_limit_buy_order(self, symbol: str, quantity: float, price: float) -> dict:
         """Cria uma ordem de compra a limite na Coinbase."""
+        if self.mock_mode:
+            order_id = f"MOCK-{uuid.uuid4().hex[:8]}"
+            print(f"[MOCK] Ordem criada: {quantity} {symbol} @ ${price:.2f} (ID: {order_id})")
+            return {"orderId": order_id, "status": "NEW"}
+        
         try:
             client_order_id = str(uuid.uuid4())
-            product_id = symbol.replace('/', '-') # Formato da Coinbase: 'BTC-USD'
+            product_id = symbol.replace('/', '-')
             
             print(f"Enviando ordem de COMPRA para Coinbase: {quantity} {product_id} @ {price}")
             
-            # Sintaxe correta para criar ordem com a biblioteca 'coinbase-advanced-py'
-            result = self.client.post_order(
+            result = self.client.limit_order_gtc_buy(
                 client_order_id=client_order_id,
                 product_id=product_id,
-                side="BUY",
-                order_configuration={
-                    "limit_limit_gtc": {
-                        "base_size": str(quantity),
-                        "limit_price": f'{price:.2f}',
-                        "post_only": False,
-                    }
-                },
+                base_size=str(quantity),
+                limit_price=str(price)
             )
             
             order_id = result.get('order_id', '')
@@ -52,27 +54,4 @@ class CoinbaseClient:
 
         except Exception as e:
             print(f"Erro ao criar ordem na Coinbase: {e}")
-            raise
-    
-    # As funções abaixo também foram atualizadas para a nova biblioteca
-    def get_order_status(self, symbol: str, order_id: str) -> dict:
-        try:
-            print(f"Consultando status da ordem ID: {order_id} na Coinbase")
-            result = self.client.get_order(order_id=order_id)
-            status = result.get('order', {}).get('status', 'UNKNOWN')
-            print("Status da ordem:", status)
-            return {"status": status}
-        except Exception as e:
-            print(f"Erro ao consultar ordem na Coinbase: {e}")
-            raise
-
-    def cancel_order(self, symbol: str, order_id: str) -> dict:
-        try:
-            print(f"Cancelando ordem ID: {order_id} na Coinbase")
-            result = self.client.cancel_orders(order_ids=[order_id])
-            success_id = result.get('results', [{}])[0].get('order_id')
-            print("Resultado do cancelamento:", result)
-            return {"status": "CANCELED" if success_id == order_id else "UNKNOWN"}
-        except Exception as e:
-            print(f"Erro ao cancelar ordem na Coinbase: {e}")
             raise

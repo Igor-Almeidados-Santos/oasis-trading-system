@@ -1,17 +1,18 @@
 import grpc
+import grpc
 from concurrent import futures
 from src.contracts_generated import trading_system_pb2
 from src.contracts_generated import trading_system_pb2_grpc
-from .client import BinanceClient
+from .client import CoinbaseClient  # ✅ Correto
 
 class ExecutionService(trading_system_pb2_grpc.ExecutionServiceServicer):
     def __init__(self):
-        self.binance_client = BinanceClient()
+        self.coinbase_client = CoinbaseClient()  # ✅ Correto
         print("ExecutionService iniciado.")
 
     def PlaceLimitBuyOrder(self, request: trading_system_pb2.OrderRequest, context):
         try:
-            result = self.binance_client.create_limit_buy_order(
+            result = self.coinbase_client.create_limit_buy_order(  # ✅ Correto
                 symbol=request.symbol,
                 quantity=request.quantity,
                 price=request.price
@@ -21,10 +22,9 @@ class ExecutionService(trading_system_pb2_grpc.ExecutionServiceServicer):
                 status=result['status']
             )
         except Exception as e:
-            context.set_details(f"Erro na API da Binance: {str(e)}")
+            context.set_details(f"Erro na API da Coinbase: {str(e)}")
             context.set_code(grpc.StatusCode.INTERNAL)
             return trading_system_pb2.OrderResponse()
-
 def serve():
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
     trading_system_pb2_grpc.add_ExecutionServiceServicer_to_server(ExecutionService(), server)
