@@ -49,3 +49,43 @@ def get_status():
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/paper/status")
+def get_paper_status():
+    """Retorna os KPIs da simulação de paper trading."""
+    # Esta é uma implementação de exemplo. A lógica de PnL seria mais complexa.
+    try:
+        db = PostgresManager()
+        query = "SELECT COUNT(*) as trade_count FROM orders WHERE exchange_order_id LIKE 'PAPER-%'"
+        result = db.execute_query(query, fetch="one")
+        return {
+            "initial_capital": 1000.0, # Exemplo
+            "current_capital": 1050.25, # Exemplo
+            "total_pnl_usd": 50.25, # Exemplo
+            "total_pnl_pct": 5.02, # Exemplo
+            "trade_count": result['trade_count'] if result else 0
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/paper/trades")
+def get_paper_trades():
+    """Retorna o histórico de trades do modo papel."""
+    try:
+        db = PostgresManager()
+        query = "SELECT side, quantity, price, created_at FROM orders WHERE exchange_order_id LIKE 'PAPER-%' ORDER BY created_at DESC"
+        trades = db.execute_query(query, fetch="all")
+        return [dict(trade) for trade in trades]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/portfolio/history")
+async def get_portfolio_history():
+    """Retorna os últimos 100 snapshots de portfólio para o gráfico."""
+    try:
+        history_cursor = app.mongodb.portfolio_history.find().sort("timestamp", -1).limit(100)
+        history = await history_cursor.to_list(length=100)
+        # Inverte a lista para que o gráfico seja exibido na ordem cronológica correta
+        return list(reversed(history))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))    

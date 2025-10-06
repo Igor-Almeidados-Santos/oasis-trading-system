@@ -2,7 +2,7 @@ services:
   mongodb:
     image: mongo:latest
     container_name: oasis_mongodb
-    ports: ["27017:27017"]
+    ports: ["27018:27017"]
     volumes: [mongo_data:/data/db]
     restart: unless-stopped
 
@@ -13,7 +13,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-    ports: ["5433:5432"]
+    ports: ["5434:5432"]
     volumes:
       - ./database/schema.sql:/docker-entrypoint-initdb.d/schema.sql
       - postgres_data:/var/lib/postgresql/data
@@ -89,6 +89,16 @@ services:
     environment:
       - WATCHPACK_POLLING=true
     depends_on: [webservice]
+    restart: unless-stopped
+
+  data-snapshot-worker:
+    build: { context: ., dockerfile: src/data_snapshot_worker/Dockerfile }
+    container_name: oasis_snapshot_worker
+    depends_on:
+      postgres-db: { condition: service_healthy }
+      mongodb: { condition: service_started }
+    env_file: .env
+    volumes: ["./src:/app/src"]
     restart: unless-stopped
 
 volumes:
