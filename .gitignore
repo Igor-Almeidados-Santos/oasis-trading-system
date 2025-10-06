@@ -1,1 +1,77 @@
+# ## 1. Ambientes Virtuais e Dependências
+# Ignora as pastas de ambientes virtuais do Python
+venv/
+.venv/
+env/
+ENV/
+
+# Ignora as dependências do Node.js
+frontend/node_modules/
+
+# ## 2. Ficheiros de Credenciais e Ambiente
+# Ignora todos os ficheiros .env que contêm segredos
 .env
+.env.*
+!.env.template # Exceção: Nunca ignore o ficheiro de template
+
+# ## 3. Artefatos de Build e Cache do Python
+# Ignora o cache do Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Ignora os ficheiros de distribuição e build
+/build/
+/dist/
+*.egg-info/
+
+# Cache do Pytest
+.pytest_cache/
+
+# ## 4. Artefatos de Build e Cache do Node.js/Frontend
+# Ignora as pastas de build do frontend
+frontend/dist/
+frontend/build/
+.next/
+
+# Logs de dependências
+npm-debug.log*
+yarn-error.log
+yarn-debug.log*
+lerna-debug.log
+
+# ## 5. Ficheiros de IDE e Editores de Código
+# Visual Studio Code
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+.history/
+
+# JetBrains (PyCharm, WebStorm, etc.)
+.idea/
+
+# Outros
+*.swp
+*.swo
+
+# ## 6. Ficheiros Específicos do Sistema Operacional
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+[Dd]esktop.ini
+
+# ## 7. Ficheiros de Log e Saída
+*.log
+logs/
+*.out
+
+# ## 8. Outros
+# Ficheiros compilados do gRPC (gerados pelo script, não precisam ser versionados)
+src/contracts_generated/
