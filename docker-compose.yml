@@ -2,7 +2,7 @@ services:
   mongodb:
     image: mongo:latest
     container_name: oasis_mongodb
-    ports: ["27018:27017"]
+    ports: ["27017:27017"]
     volumes: [mongo_data:/data/db]
     restart: unless-stopped
 
@@ -13,7 +13,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-    ports: ["5434:5432"]
+    ports: ["5434:5432"] # Usando a porta 5434 para evitar conflitos
     volumes:
       - ./database/schema.sql:/docker-entrypoint-initdb.d/schema.sql
       - postgres_data:/var/lib/postgresql/data
@@ -28,7 +28,7 @@ services:
     container_name: oasis_order_executor
     depends_on: { postgres-db: { condition: service_healthy } }
     env_file: .env
-    ports: ["50052:50052"]
+    # A porta 50052 não precisa ser exposta ao host, apenas à rede interna
     volumes: ["./src:/app/src"]
     restart: unless-stopped
     healthcheck:
@@ -43,7 +43,6 @@ services:
     container_name: oasis_risk_engine
     depends_on: { order-executor: { condition: service_healthy } }
     env_file: .env
-    ports: ["50051:50051"]
     volumes: ["./src:/app/src"]
     restart: unless-stopped
     healthcheck:
@@ -58,7 +57,7 @@ services:
     container_name: oasis_strategy_engine
     depends_on: { risk-engine: { condition: service_healthy } }
     env_file: .env
-    volumes: ["./src:/app/src"]
+    volumes: ["./src:/app/src"] # Removido o shared-volume que não é mais necessário
     restart: unless-stopped
 
   webservice:
@@ -76,29 +75,27 @@ services:
       retries: 5
       start_period: 10s
   
+  telegram-bot:
+    build: { context: ., dockerfile: src/telegram_bot/Dockerfile }
+    container_name: oasis_telegram_bot
+    depends_on: { webservice: { condition: service_healthy } }
+    env_file: .env
+    volumes: ["./src:/app/src"]
+    restart: unless-stopped
+
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
     container_name: oasis_frontend
     ports:
-      - "3000:5173" # ✅ CORREÇÃO DA PORTA
+      - "3000:5173"
     volumes:
       - ./frontend:/app
       - /app/node_modules
     environment:
       - WATCHPACK_POLLING=true
     depends_on: [webservice]
-    restart: unless-stopped
-
-  data-snapshot-worker:
-    build: { context: ., dockerfile: src/data_snapshot_worker/Dockerfile }
-    container_name: oasis_snapshot_worker
-    depends_on:
-      postgres-db: { condition: service_healthy }
-      mongodb: { condition: service_started }
-    env_file: .env
-    volumes: ["./src:/app/src"]
     restart: unless-stopped
 
 volumes:
