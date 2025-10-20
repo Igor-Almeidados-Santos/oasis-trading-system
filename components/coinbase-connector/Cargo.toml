@@ -1,0 +1,19 @@
+[package]
+name = "coinbase-connector"
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.28", features = ["full"] }
+tokio-tungstenite = { version = "0.19", features = ["native-tls"] }
+serde_json = "1.0"
+# Adicionado para derive macros
+serde = { version = "1.0", features = ["derive"] } 
+futures-util = "0.3"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+# Adicionado para integração com Kafka
+rdkafka = { version = "0.34", features = ["tokio"] }
+# Adicionado para serialização em Protobuf (vamos simular o código gerado por agora)
+prost = "0.11"
+prost-types = "0.11"
