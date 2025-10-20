@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package oasis.marketdata;
+
+import "google/protobuf/timestamp.proto";
+
+message Header {
+  string exchange = 1;
+  string symbol = 2;
+  google.protobuf.Timestamp exchange_timestamp = 3;
+  google.protobuf.Timestamp received_timestamp = 4;
+}
+
+message TradeUpdate {
+  string trade_id = 1;
+  string price = 2;
+  string quantity = 3;
+  string side = 4;
+}
+
+message MarketDataEvent {
+  Header header = 1;
+  oneof payload {
+    // Reserved for future types: OrderBookUpdate = 2
+    TradeUpdate trade_update = 3;
+  }
+}
+

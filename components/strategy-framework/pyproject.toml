@@ -1,0 +1,24 @@
+# File: components/strategy-framework/pyproject.toml
+
+[tool.poetry]
+name = "strategy-framework"
+version = "1.0.0"
+description = "Handles consumption of market data and execution of trading strategies."
+authors = ["Joel <joel@trading-system.com>"]
+packages = [
+  { include = "generated", from = "src" },
+  { include = "strategies", from = "src" },
+  { include = "tools", from = "src" }
+]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+confluent-kafka = "^2.3.0"  # Cliente Kafka robusto e performático
+protobuf = "^4.25.0"      # Para trabalhar com os contratos Protobuf
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.4"
+grpcio-tools = "^1.62.0"
+
+[tool.poetry.scripts]
+gen-proto = "tools.gen_proto:main"

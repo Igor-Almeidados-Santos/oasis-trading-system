@@ -1,0 +1,40 @@
+# --- OS / Editor ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# --- Rust ---
+target/
+**/target/
+Cargo.lock
+
+# --- Python ---
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+dist/
+build/
+*.egg-info/
+pip-wheel-metadata/
+venv/
+.venv/
+
+# Generated Protobufs (keep package marker)
+components/strategy-framework/src/generated/*.py
+!components/strategy-framework/src/generated/__init__.py
+
+# --- Logs ---
+*.log
+
+# --- Docker ---
+.env
+

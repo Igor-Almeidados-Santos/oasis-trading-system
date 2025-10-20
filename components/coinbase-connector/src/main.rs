@@ -1,16 +1,51 @@
-use futures_util::{SinkExt, StreamExt};
-use serde_json::json;
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
-use tracing::{error, info};
+mod schemas;
 
-// URL padrão do WebSocket da Coinbase
-const DEFAULT_COINBASE_WS_URL: &str = "wss://ws-feed.pro.coinbase.com";
+use futures_util::{SinkExt, StreamExt};
+use prost::Message as ProstMessage;
+use rdkafka::config::ClientConfig;
+use rdkafka::producer::{FutureProducer, FutureRecord};
+use schemas::{
+    proto::{market_data_event, Header, MarketDataEvent, TradeUpdate},
+    CoinbaseMatch,
+};
+use serde_json::json;
+use std::time::Duration;
+use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
+use tracing::{error, info, warn};
+use prost_types::Timestamp;
+
+
+// Constantes para configuração
+const DEFAULT_COINBASE_WS_URL: &str = "wss://ws-feed.exchange.coinbase.com";
+const KAFKA_TOPIC: &str = "market-data.trades.coinbase";
+
+// Função helper para converter do formato da exchange para o nosso formato interno.
+fn to_internal_format(msg: &CoinbaseMatch) -> MarketDataEvent {
+    let now = std::time::SystemTime::now();
+    MarketDataEvent {
+        header: Some(Header {
+            exchange: "coinbase".to_string(),
+            symbol: msg.product_id.clone(),
+            exchange_timestamp: Some(Timestamp::from(now)), // Simplificado
+            received_timestamp: Some(Timestamp::from(now)),
+        }),
+        payload: Some(market_data_event::Payload::TradeUpdate(
+            TradeUpdate {
+                trade_id: msg.trade_id.to_string(),
+                price: msg.price.clone(),
+                quantity: msg.size.clone(),
+                side: msg.side.to_uppercase(),
+            },
+        )),
+    }
+}
 
 // Função principal do conector: conecta, assina e processa mensagens.
 pub async fn run_connector(
     ws_url: &str,
     product_ids: &[&str],
     channels: &[&str],
+    kafka_producer: &FutureProducer, // Passamos o producer como referência
     max_messages: Option<usize>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (ws_stream, response) = connect_async(ws_url).await?;
@@ -28,16 +63,43 @@ pub async fn run_connector(
     writer.send(Message::Text(subscribe_str)).await?;
 
     info!("Aguardando mensagens...");
-    let mut processed: usize = 0;
+    let mut processed_count: usize = 0;
     loop {
         tokio::select! {
             Some(msg) = reader.next() => {
                 match msg {
                     Ok(Message::Text(text)) => {
-                        info!(raw_message = %text, "Mensagem recebida");
-                        processed += 1;
+                        // ETAPA DE PROCESSAMENTO INTEGRADA AQUI
+                        match serde_json::from_str::<CoinbaseMatch>(&text) {
+                            Ok(coinbase_match) => {
+                                let internal_msg = to_internal_format(&coinbase_match);
+                                let mut buf = Vec::new();
+                                internal_msg.encode(&mut buf)?;
+
+                                let record = FutureRecord::to(KAFKA_TOPIC)
+                                    .payload(&buf)
+                                    .key(&internal_msg.header.as_ref().unwrap().symbol);
+
+                                // Aguarda a entrega para garantir a vida útil do buffer e reportar erros.
+                                let _ = kafka_producer
+                                    .send(record, Duration::from_secs(0))
+                                    .await
+                                    .unwrap_or_else(|(e, _)| {
+                                        warn!(error = ?e, "Falha ao enviar mensagem para o Kafka");
+                                        (-1, -1)
+                                    });
+                            }
+                            Err(_) => {
+                                // Ignora mensagens que não são do tipo 'match' (ex: 'subscriptions')
+                            }
+                        }
+
+                        processed_count += 1;
                         if let Some(limit) = max_messages {
-                            if processed >= limit { break; }
+                            if processed_count >= limit {
+                                info!("Limite de mensagens atingido. Encerrando.");
+                                break;
+                            }
                         }
                     },
                     Ok(other_msg) => {
@@ -61,20 +123,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
     info!("Iniciando Coinbase Connector...");
 
-    // Permite sobrescrever a URL via variável de ambiente (útil para testes)
+    // Configura o producer do Kafka
+    let kafka_brokers = std::env::var("KAFKA_BROKERS").unwrap_or_else(|_| "localhost:9092".to_string());
+    let producer: FutureProducer = ClientConfig::new()
+        .set("bootstrap.servers", &kafka_brokers)
+        .set("message.timeout.ms", "5000")
+        .create()?;
+
     let ws_url = std::env::var("COINBASE_WS_URL")
         .unwrap_or_else(|_| DEFAULT_COINBASE_WS_URL.to_string());
 
-    let product_ids = ["BTC-USD"]; // padrão
-    let channels = ["matches"]; // padrão
+    let product_ids = ["BTC-USD", "ETH-USD"];
+    let channels = ["matches"];
 
-    run_connector(&ws_url, &product_ids, &channels, None).await
+    run_connector(&ws_url, &product_ids, &channels, &producer, None).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::run_connector;
     use futures_util::{SinkExt, StreamExt};
+    use rdkafka::config::ClientConfig;
+    use rdkafka::producer::FutureProducer;
     use tokio::net::TcpListener;
     use tokio_tungstenite::{accept_async, tungstenite::protocol::Message};
 
@@ -101,7 +171,15 @@ mod tests {
         let ws_url = format!("ws://{}:{}", addr.ip(), addr.port());
         let product_ids = ["BTC-USD"];
         let channels = ["matches"];
-        let res = run_connector(&ws_url, &product_ids, &channels, Some(1)).await;
+
+        // Cria um produtor Kafka com timeout curto para os testes (não requer broker ativo).
+        let producer: FutureProducer = ClientConfig::new()
+            .set("bootstrap.servers", "localhost:9092")
+            .set("message.timeout.ms", "50")
+            .create()
+            .expect("falha ao criar FutureProducer para teste");
+
+        let res = run_connector(&ws_url, &product_ids, &channels, &producer, Some(1)).await;
 
         let _ = server.await;
         assert!(res.is_ok());
