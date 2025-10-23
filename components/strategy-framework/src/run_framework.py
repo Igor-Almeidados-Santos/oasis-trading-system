@@ -11,7 +11,7 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
 KAFKA_BROKERS = os.environ.get("KAFKA_BROKERS", "localhost:9092")
-KAFKA_TOPIC = os.environ.get("KAFKA_TOPIC", "market-data.trades.coinbase")
+KAFKA_TOPIC = os.environ.get("KAFKA_TOPIC", "market-data.trades.normalized")
 GROUP_ID = os.environ.get("GROUP_ID", "strategy-framework-group")
 SYMBOL = os.environ.get("STRATEGY_SYMBOL", "BTC-USD")
 
@@ -66,4 +66,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         log.info("Encerrado pelo usuário.")
-

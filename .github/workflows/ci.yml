@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  rust:
+    name: Rust components
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run fmt (coinbase-connector)
+        run: cargo fmt --manifest-path components/coinbase-connector/Cargo.toml -- --check
+      - name: Run fmt (risk-engine)
+        run: cargo fmt --manifest-path components/risk-engine/Cargo.toml -- --check
+      - name: Run tests (coinbase-connector)
+        run: cargo test --manifest-path components/coinbase-connector/Cargo.toml
+      - name: Run tests (risk-engine)
+        run: cargo test --manifest-path components/risk-engine/Cargo.toml
+
+  go:
+    name: Go components
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: components/order-manager/go.mod
+      - name: Run gofmt
+        run: gofmt -w $(find . -name '*.go' -not -path './vendor/*')
+        working-directory: components/order-manager
+      - name: Ensure clean fmt
+        run: git diff --exit-code
+      - name: Run tests
+        run: go test ./...
+        working-directory: components/order-manager
+
+  python:
+    name: Strategy framework
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Poetry
+        run: pip install poetry
+      - name: Install dependencies
+        run: poetry install --no-root
+        working-directory: components/strategy-framework
+      - name: Generate protobufs
+        run: poetry run gen-proto
+        working-directory: components/strategy-framework
+      - name: Run pytest
+        run: poetry run pytest
+        working-directory: components/strategy-framework

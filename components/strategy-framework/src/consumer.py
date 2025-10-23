@@ -3,8 +3,7 @@ import asyncio
 import logging
 import grpc
 from confluent_kafka import Consumer, KafkaError, KafkaException
-import os               # <-- ADICIONADO
-from dotenv import load_dotenv # <-- ADICIONADO
+from dotenv import load_dotenv
 
 # Imports gerados (com fallback para imports absolutos)
 try:
@@ -37,8 +36,10 @@ except Exception:
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 log = logging.getLogger(__name__)
 
+load_dotenv()
+
 KAFKA_BROKERS = os.getenv("KAFKA_BROKERS", "localhost:9092")
-KAFKA_TOPIC = "market-data.trades.coinbase"
+KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "market-data.trades.normalized")
 GROUP_ID = "strategy-framework-group"
 RISK_ENGINE_ADDRESS = os.getenv("RISK_ENGINE_GRPC_ADDR", "localhost:50051")
 METRICS_PORT = int(os.getenv("STRATEGY_METRICS_PORT", 9092))
@@ -117,4 +118,3 @@ async def run_consumer() -> None:
 
 if __name__ == '__main__':
     asyncio.run(run_consumer())
-

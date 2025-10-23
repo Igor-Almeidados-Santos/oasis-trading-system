@@ -3,10 +3,10 @@
 Oasis Trading System é uma plataforma modular para ingestão de dados de mercado, geração de sinais, validação de risco e execução de ordens em corretoras cripto. A stack usa Rust, Python e Go, mensageria via Kafka e gRPC para comunicação síncrona entre serviços.
 
 ```
-Coinbase WS  -->  coinbase-connector (Rust)  --Kafka-->  strategy-framework (Python)
-                                                              |
-                                                              v
-                                                        risk-engine (Rust)  --gRPC-->  order-manager (Go)  --> Coinbase REST
+Coinbase WS  -->  coinbase-connector (Rust)  --Kafka-->  data-normalizer (Rust)  --Kafka-->  strategy-framework (Python)
+                                                                                                 |
+                                                                                                 v
+                                                                                           risk-engine (Rust)  --gRPC-->  order-manager (Go)  --> Coinbase REST
 ```
 
 ## Estrutura do repositório
@@ -15,7 +15,7 @@ Coinbase WS  -->  coinbase-connector (Rust)  --Kafka-->  strategy-framework (Pyt
 - `components/strategy-framework/` consumo de market data, geração de sinais e envio ao risk engine (Python 3.11 + Poetry).
 - `components/risk-engine/` serviço gRPC que valida risco e encaminha ordens (Rust + Redis opcional).
 - `components/order-manager/` ponte gRPC -> Coinbase REST API (Go).
-- `components/data-normalizer/` placeholder para futura normalização de dados.
+- `components/data-normalizer/` normaliza eventos de mercado e publica em tópico dedicado (Rust).
 - `infra/monitoring/` Prometheus configuration.
 - `docker-compose.yml` infraestrutura local (Kafka, Prometheus, Grafana).
 - `scripts/` utilitários multiplataforma para geração de código.
@@ -95,16 +95,25 @@ Recomenda-se iniciar na ordem abaixo, cada um em um terminal separado:
    - Usa `ORDER_MANAGER_ADDR`, `RISK_USE_REDIS`, `RISK_ENGINE_GRPC_ADDR`.
    - Persistência em Redis se disponível; defina `RISK_USE_REDIS=0` para memória.
 
-3. **Strategy Framework (Python)**
+3. **Data Normalizer (Rust)**
+   ```bash
+   cd components/data-normalizer
+   cargo run
+   ```
+   - Consome `market-data.trades.coinbase`, normaliza campos e republica em `market-data.trades.normalized`.
+   - Utilize variáveis `KAFKA_BROKERS` e `GROUP_ID` específicas se desejar isolamento.
+
+4. **Strategy Framework (Python)**
    ```bash
    cd components/strategy-framework
    poetry run python src/run_framework.py
    ```
+   - Ajuste `KAFKA_TOPIC=market-data.trades.normalized` para consumir o tópico normalizado.
    - Consome Kafka (`KAFKA_BROKERS`), gera sinais e invoca o risk engine.
    - Para enviar sinais manualmente: `poetry run send-sample --count 5`.
    - Consumidor completo com risco integrado: `poetry run python src/consumer.py`.
 
-4. **Coinbase Connector (Rust)**
+5. **Coinbase Connector (Rust)**
    ```bash
    cd components/coinbase-connector
    cargo run
@@ -114,12 +123,13 @@ Recomenda-se iniciar na ordem abaixo, cada um em um terminal separado:
 
 ### Fluxo ponta-a-ponta
 1. O conector recebe trades via WebSocket e os publica no tópico `market-data.trades.coinbase`.
-2. O strategy framework consome o tópico, roda `SimpleMomentum` e envia sinais ao risk engine.
-3. O risk engine valida limites (ordem e posição), opcionalmente consulta Redis, e chama o order manager.
-4. O order manager assina a ordem via REST autenticado na Coinbase e devolve o resultado.
+2. O data normalizer consome o tópico bruto, ajusta casing/precisão e republica em `market-data.trades.normalized`.
+3. O strategy framework consome o tópico normalizado, roda `SimpleMomentum` e envia sinais ao risk engine.
+4. O risk engine valida limites (ordem e posição), opcionalmente consulta Redis, e chama o order manager.
+5. O order manager assina a ordem via REST autenticado na Coinbase e devolve o resultado.
 
 ## Variáveis de ambiente chave
-- `KAFKA_BROKERS`, `KAFKA_TOPIC`, `GROUP_ID`: configuração de mensageria.
+- `KAFKA_BROKERS`, `KAFKA_TOPIC`, `GROUP_ID`: configuração de mensageria (defina `KAFKA_TOPIC=market-data.trades.normalized` para consumidores).
 - `COINBASE_WS_URL`: endpoint WebSocket do conector.
 - `STRATEGY_SYMBOL`, `STRATEGY_METRICS_PORT`.
 - `RISK_ENGINE_GRPC_ADDR`, `RISK_USE_REDIS`, `RISK_METRICS_PORT`.
@@ -131,6 +141,7 @@ Recomenda-se iniciar na ordem abaixo, cada um em um terminal separado:
 - Risk engine: `cargo fmt && cargo clippy && cargo test` (requer mocks adicionais para novas funcionalidades).
 - Estratégia: `cd components/strategy-framework && poetry run pytest` (adicionar testes em `tests/`).
 - Pode-se simular market data com `poetry run send-sample --topic market-data.trades.coinbase`.
+- Para validar o normalizador isoladamente: `cargo run --manifest-path components/data-normalizer/Cargo.toml`.
 
 ## Observabilidade e alertas
 - Métricas prometheus:
@@ -146,7 +157,6 @@ Recomenda-se iniciar na ordem abaixo, cada um em um terminal separado:
 - Restrinja acesso outbound dos serviços ao conjunto mínimo de hosts (Coinbase, Kafka, Redis).
 
 ## Próximos passos sugeridos
-- Completar o `data-normalizer` para produzir payloads enriquecidos.
 - Adicionar testes de carga (veja `tests/load/trading_system_load.js`) via k6/Artillery.
 - Automatizar builds com CI (lint/test dos três ecossistemas).
 - Documentar ADRs adicionais em `docs/adrs/` e runbooks operacionais em `docs/runbooks/`.
