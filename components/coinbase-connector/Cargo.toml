@@ -17,3 +17,4 @@ rdkafka = { version = "0.34", features = ["tokio", "cmake-build"] }
 # Adicionado para serializaÃ§Ã£o em Protobuf (vamos simular o cÃ³digo gerado por agora)
 prost = "0.11"
 prost-types = "0.11"
+dotenv = "0.15.0"

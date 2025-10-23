@@ -13,7 +13,15 @@ use std::time::Duration;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use tracing::{error, info, warn};
 use prost_types::Timestamp;
+use dotenv::dotenv;
 
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Adicionar esta linha no início da função main
+    dotenv::from_path("../../.env").ok(); // Tenta carregar o .env da raiz do projeto
+
+    tracing_subscriber::fmt::init();
+    info!("Iniciando Coinbase Connector...");
 
 // Constantes para configuração
 const DEFAULT_COINBASE_WS_URL: &str = "wss://ws-feed.exchange.coinbase.com";

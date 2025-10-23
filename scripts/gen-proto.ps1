@@ -25,6 +25,6 @@ PY
 ) `
     --python_out=$PyOut `
     --grpc_python_out=$PyOut `
-    $ProtoSrc\market_data.proto
+    $ProtoSrc\*.proto
 
 Write-Host "Código gerado em: $PyOut"

@@ -3,6 +3,8 @@ syntax = "proto3";
 package oasis.marketdata;
 
 import "google/protobuf/timestamp.proto";
+// Caminho de import para o código Go gerado. Ajuste o prefixo para o seu module do Go.
+option go_package = "oasis-trading-system/components/order-manager/generated/contracts;contracts";
 
 message Header {
   string exchange = 1;
@@ -25,4 +27,3 @@ message MarketDataEvent {
     TradeUpdate trade_update = 3;
   }
 }
-

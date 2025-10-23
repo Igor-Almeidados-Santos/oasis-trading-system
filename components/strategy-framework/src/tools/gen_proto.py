@@ -28,9 +28,10 @@ def main() -> int:
     py_out.mkdir(parents=True, exist_ok=True)
     (py_out / "__init__.py").touch(exist_ok=True)
 
-    proto_file = proto_src / "market_data.proto"
-    if not proto_file.exists():
-        print(f"Arquivo de proto não encontrado: {proto_file}", file=sys.stderr)
+    # Coleta todos os .proto no diretório (market_data.proto, actions.proto, etc.)
+    proto_files = sorted(p for p in proto_src.glob("*.proto") if p.is_file())
+    if not proto_files:
+        print(f"Nenhum arquivo .proto encontrado em: {proto_src}", file=sys.stderr)
         return 2
 
     # Inclui o path dos well-known types do protobuf (timestamp.proto, etc.)
@@ -48,7 +49,7 @@ def main() -> int:
         *[f"--proto_path={p}" for p in include_paths],
         f"--python_out={py_out}",
         f"--grpc_python_out={py_out}",
-        str(proto_file),
+        *[str(p) for p in proto_files],
     ]
 
     return protoc.main(args)

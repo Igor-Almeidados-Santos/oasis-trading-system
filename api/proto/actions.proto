@@ -1,0 +1,52 @@
+syntax = "proto3";
+
+package trading.contracts;
+
+import "google/protobuf/timestamp.proto";
+// Caminho de import para o código Go gerado. Ajuste o prefixo para o seu module do Go.
+option go_package = "oasis-trading-system/components/order-manager/generated/contracts;contracts";
+
+// Sinal de negociação emitido por uma estratégia
+message TradingSignal {
+  string strategy_id = 1;
+  string symbol = 2;
+  string side = 3;             // BUY / SELL
+  double confidence = 4;       // 0.0 .. 1.0
+  google.protobuf.Timestamp signal_timestamp = 5;
+}
+
+// Pedido de ordem gerado após validação de risco
+message OrderRequest {
+  string client_order_id = 1;
+  string symbol = 2;
+  string side = 3;            // BUY / SELL
+  string order_type = 4;      // LIMIT / MARKET
+  string quantity = 5;
+  string price = 6;           // Para LIMIT
+  string strategy_id = 7;
+}
+
+// Resposta da validação de risco
+message SignalValidationResponse {
+  bool approved = 1;
+  string reason = 2;
+  OrderRequest order_request = 3;
+}
+
+// Serviço gRPC de validação de risco
+service RiskValidator {
+  rpc ValidateSignal(TradingSignal) returns (SignalValidationResponse);
+}
+
+// --- Order Manager ---
+// Resposta de submissão de ordem pela corretora
+message OrderSubmissionResponse {
+  string order_id = 1;
+  string status = 2;   // e.g. ACCEPTED / REJECTED
+  string details = 3;  // mensagem adicional
+}
+
+// Serviço gRPC de execução de ordens
+service OrderExecutor {
+  rpc ExecuteOrder(OrderRequest) returns (OrderSubmissionResponse);
+}
