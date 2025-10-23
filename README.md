@@ -42,6 +42,51 @@ Sugestões de instalação:
   - Para `rdkafka`, instale o Visual Studio Build Tools (C++ workload) e `choco install lz4 zstd`.
   - Redis pode ser executado em WSL ou via `docker run -p 6379:6379 redis:7`.
 
+### Links de download por sistema operacional
+- **Linux**
+  - Git: https://git-scm.com/download/linux
+  - Docker Engine: https://docs.docker.com/engine/install/
+  - Docker Compose: https://docs.docker.com/compose/install/
+  - Protobuf (`protoc`): https://github.com/protocolbuffers/protobuf/releases
+  - CMake: https://cmake.org/download/
+  - pkg-config: https://www.freedesktop.org/wiki/Software/pkg-config/
+  - Redis: https://redis.io/docs/getting-started/installation/install-redis-on-linux/
+  - Rust (rustup): https://www.rust-lang.org/tools/install
+  - Go: https://go.dev/dl/
+  - Python 3.11: https://www.python.org/downloads/release/python-3110/
+  - Poetry: https://python-poetry.org/docs/#installation
+  - librdkafka: https://github.com/confluentinc/librdkafka#installation
+
+- **macOS**
+  - Git: https://git-scm.com/download/mac
+  - Docker Desktop: https://www.docker.com/products/docker-desktop/
+  - Protobuf (`protoc`): https://github.com/protocolbuffers/protobuf/releases
+  - CMake: https://cmake.org/download/
+  - pkg-config: https://www.freedesktop.org/wiki/Software/pkg-config/
+  - Redis (Homebrew ou imagem Docker): https://redis.io/docs/getting-started/installation/install-redis-on-mac-os/
+  - Rust (rustup): https://www.rust-lang.org/tools/install
+  - Go: https://go.dev/dl/
+  - Python 3.11: https://www.python.org/downloads/macos/
+  - Poetry: https://python-poetry.org/docs/#installation
+  - librdkafka (Homebrew): https://formulae.brew.sh/formula/librdkafka
+
+- **Windows**
+  - Git: https://git-scm.com/download/win
+  - Docker Desktop: https://www.docker.com/products/docker-desktop/
+  - WSL: https://learn.microsoft.com/windows/wsl/install
+  - Protobuf (`protoc`): https://github.com/protocolbuffers/protobuf/releases
+  - CMake: https://cmake.org/download/
+  - pkg-config (via MSYS2): https://www.msys2.org/
+  - Visual Studio Build Tools: https://visualstudio.microsoft.com/visual-cpp-build-tools/
+  - Redis (WSL ou Docker): https://redis.io/docs/getting-started/installation/install-redis-on-windows/
+  - Rust (rustup): https://www.rust-lang.org/tools/install
+  - Go: https://go.dev/dl/
+  - Python 3.11: https://www.python.org/downloads/windows/
+  - Poetry: https://python-poetry.org/docs/#installation
+  - librdkafka (Windows build): https://github.com/confluentinc/librdkafka#build-from-source
+  - lz4: https://community.chocolatey.org/packages/lz4
+  - zstd: https://community.chocolatey.org/packages/zstd
+
 ## Configuração de ambiente
 1. Clone o repositório e entre no diretório.
 2. Copie o template de variáveis: `cp .env.example .env` (PowerShell: `Copy-Item .env.example .env`).
