@@ -14,6 +14,8 @@ KAFKA_BROKERS = os.environ.get("KAFKA_BROKERS", "localhost:9092")
 KAFKA_TOPIC = os.environ.get("KAFKA_TOPIC", "market-data.trades.normalized")
 GROUP_ID = os.environ.get("GROUP_ID", "strategy-framework-group")
 SYMBOL = os.environ.get("STRATEGY_SYMBOL", "BTC-USD")
+FRAMEWORK_KAFKA_CHECK_ATTEMPTS = int(os.environ.get("FRAMEWORK_KAFKA_CHECK_ATTEMPTS", "12"))
+FRAMEWORK_KAFKA_CHECK_BACKOFF_MS = int(os.environ.get("FRAMEWORK_KAFKA_CHECK_BACKOFF_MS", "5000"))
 
 
 async def main() -> None:
@@ -28,6 +30,10 @@ async def main() -> None:
     log.info("Framework iniciado. Aguardando mensagens de %s...", KAFKA_TOPIC)
 
     try:
+        # Aguarda Kafka e disponibilidade do tópico antes de subscrever
+        if not await wait_for_kafka_topic(consumer, KAFKA_TOPIC, FRAMEWORK_KAFKA_CHECK_ATTEMPTS, FRAMEWORK_KAFKA_CHECK_BACKOFF_MS):
+            log.error("Kafka/tópico indisponível após tentativas. Encerrando.")
+            return
         consumer.subscribe([KAFKA_TOPIC])
 
         while True:
@@ -39,6 +45,9 @@ async def main() -> None:
             if msg.error():
                 if msg.error().code() == KafkaError._PARTITION_EOF:
                     log.info("EOF %s[%s]", msg.topic(), msg.partition())
+                elif msg.error().code() == KafkaError.UNKNOWN_TOPIC_OR_PART:
+                    log.warning("Tópico ainda não disponível. Aguardando...")
+                    await asyncio.sleep(1.0)
                 else:
                     raise KafkaException(msg.error())
                 continue
@@ -59,6 +68,22 @@ async def main() -> None:
     finally:
         consumer.close()
         log.info("Framework encerrado.")
+
+
+async def wait_for_kafka_topic(consumer: Consumer, topic: str, attempts: int, backoff_ms: int) -> bool:
+    for i in range(1, attempts + 1):
+        try:
+            md = consumer.list_topics(topic, timeout=3.0)
+            tmd = md.topics.get(topic)
+            if tmd is not None and tmd.error is None:
+                log.info("Conectividade Kafka OK e tópico '%s' disponível (tentativa %d)", topic, i)
+                return True
+            else:
+                log.warning("Kafka OK, mas tópico '%s' ainda indisponível (tentativa %d)", topic, i)
+        except Exception as e:
+            log.warning("Falha ao obter metadata do Kafka (tentativa %d): %s", i, e)
+        await asyncio.sleep(backoff_ms / 1000.0)
+    return False
 
 
 if __name__ == "__main__":

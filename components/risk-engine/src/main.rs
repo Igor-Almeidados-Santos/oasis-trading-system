@@ -146,8 +146,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
     let addr = "[::1]:50051".parse()?;
     
-    // Conexão com o OrderManager
-    let order_manager_addr = std::env::var("ORDER_MANAGER_ADDR").unwrap_or_else(|_| ORDER_MANAGER_ADDR.to_string());
+    // Conexão com o OrderManager (suporta ORDER_MANAGER_ADDR ou ORDER_MANAGER_GRPC_ADDR)
+    let mut order_manager_addr = std::env::var("ORDER_MANAGER_ADDR")
+        .or_else(|_| std::env::var("ORDER_MANAGER_GRPC_ADDR"))
+        .unwrap_or_else(|_| ORDER_MANAGER_ADDR.to_string());
+    if !order_manager_addr.starts_with("http://") && !order_manager_addr.starts_with("https://") {
+        order_manager_addr = format!("http://{}", order_manager_addr);
+    }
     info!("A ligar-se ao OrderManager em {}...", order_manager_addr);
     let order_manager_client = OrderExecutorClient::connect(order_manager_addr).await?;
 

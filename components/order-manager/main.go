@@ -55,12 +55,20 @@ func main() {
         log.Println("Atenção: Ficheiro .env não encontrado. A usar vars de ambiente do sistema.")
     }
 
-    port := os.Getenv("ORDER_MANAGER_GRPC_ADDR")
-    if port == "" {
-        port = "[::1]:50052" // Valor padrão
-    }
+	port := os.Getenv("ORDER_MANAGER_GRPC_ADDR")
+	if port == "" {
+		// Padrão em IPv4 para compatibilidade no Windows
+		port = "0.0.0.0:50052"
+	}
 
-	log.Printf("Iniciando OrderManager (Go) [MODO PRODUÇÃO] na porta %s...", port)
+	mode := os.Getenv("ORDER_MANAGER_MODE")
+	if mode == "" {
+		mode = "paper" // padrão seguro
+	}
+	log.Printf("Iniciando OrderManager (Go) no modo %s na porta %s...", mode, port)
+
+	// Inicia servidor de métricas Prometheus
+	startMetricsServer()
 
 	lis, err := net.Listen("tcp", port)
 	if err != nil {

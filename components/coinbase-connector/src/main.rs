@@ -5,7 +5,10 @@ use connector::CoinbaseConnector;
 use dotenv::dotenv;
 use rdkafka::config::ClientConfig;
 use rdkafka::producer::FutureProducer;
+use rdkafka::producer::Producer; // para acessar producer.client()
 use tracing::info;
+use tracing::{error, warn};
+use std::time::Duration;
 
 mod config {
     use super::{DEFAULT_COINBASE_WS_URL, KAFKA_TOPIC};
@@ -374,7 +377,7 @@ mod connector {
     }
 }
 
-const DEFAULT_COINBASE_WS_URL: &str = "wss://ws-feed.pro.coinbase.com";
+const DEFAULT_COINBASE_WS_URL: &str = "wss://ws-feed.exchange.coinbase.com";
 const CONNECTOR_USER_AGENT: &str = "oasis-coinbase-connector/1.0";
 const KAFKA_TOPIC: &str = "market-data.trades.coinbase";
 
@@ -393,10 +396,58 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .set("message.timeout.ms", "5000")
         .create()?;
 
+    // Verificação de conectividade com Kafka antes de iniciar o WS
+    let attempts: u32 = std::env::var("CONNECTOR_KAFKA_CHECK_ATTEMPTS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(6);
+    let backoff_ms: u64 = std::env::var("CONNECTOR_KAFKA_CHECK_BACKOFF_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5000);
+
+    if !wait_for_kafka(&producer, &config.kafka_topic, attempts, backoff_ms).await {
+        error!(
+            brokers = %config.kafka_brokers,
+            topic = %config.kafka_topic,
+            attempts,
+            backoff_ms,
+            "Kafka indisponível: não foi possível obter metadata"
+        );
+        error!(
+            "Dicas: verifique se o broker está ativo (docker-compose up -d zookeeper kafka), se a porta 9092 responde (Test-NetConnection localhost -Port 9092), e se o tópico existe (docker exec -it kafka kafka-topics --list --bootstrap-server localhost:9092)"
+        );
+        return Err("Kafka não disponível".into());
+    }
+
     let connector = CoinbaseConnector::new(config, producer);
     connector.run().await?;
 
     Ok(())
+}
+
+async fn wait_for_kafka(
+    producer: &FutureProducer,
+    topic: &str,
+    attempts: u32,
+    backoff_ms: u64,
+) -> bool {
+    for i in 1..=attempts {
+        let client = producer.client();
+        match client.fetch_metadata(Some(topic), Duration::from_secs(3)) {
+            Ok(md) => {
+                let brokers = md.brokers().len();
+                let topics = md.topics().len();
+                info!(attempt = i, brokers, topics, "Conectividade Kafka OK");
+                return true;
+            }
+            Err(e) => {
+                warn!(attempt = i, error = %e, "Falha ao obter metadata do Kafka");
+                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+            }
+        }
+    }
+    false
 }
 
 #[cfg(test)]

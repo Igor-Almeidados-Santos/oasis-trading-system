@@ -4,6 +4,7 @@ go 1.24.0
 
 require (
 	github.com/joho/godotenv v1.5.1
+	github.com/prometheus/client_golang v1.18.0
 	google.golang.org/grpc v1.76.0
 	google.golang.org/protobuf v1.36.10
 )

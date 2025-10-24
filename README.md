@@ -106,13 +106,20 @@ Principais variáveis:
 - `KAFKA_BROKERS=localhost:9092`
 - `KAFKA_TOPIC=market-data.trades.normalized`
 - `GROUP_ID=ots-strategy`
-- `COINBASE_WS_URL=wss://ws-feed.pro.coinbase.com`
+- `COINBASE_WS_URL=wss://ws-feed.exchange.coinbase.com`
 - `COINBASE_KAFKA_TOPIC=market-data.trades.coinbase`
 - `COINBASE_PRODUCT_IDS=BTC-USD,ETH-USD` (lista separada por vírgula)
 - `COINBASE_CHANNELS=matches`
 - `CONNECTOR_MAX_MESSAGES=` (opcional; vazio = fluxo contínuo)
 - `CONNECTOR_BACKOFF_INITIAL_MS=1000` e `CONNECTOR_BACKOFF_MAX_MS=60000`
 - `RISK_USE_REDIS=1` (use `0` para modo stateless)
+- `ORDER_MANAGER_MODE=paper|real` (paper = simulado, não envia ordens reais)
+- `COINBASE_API_BASE_URL=https://api.exchange.coinbase.com` (ajuste conforme API da Coinbase Exchange/Advanced Trade)
+- `ORDER_MANAGER_COINBASE_VARIANT=advanced_trade|exchange` (define esquema de autenticação e paths)
+- `ORDER_MANAGER_COINBASE_ENV=prod|sandbox` (se `COINBASE_API_BASE_URL` não for definido, escolhe um base URL padrão)
+- `ORDER_MANAGER_HTTP_MAX_RETRIES=3` e `ORDER_MANAGER_HTTP_BACKOFF_MS=500` (retries de 429/5xx com backoff exponencial simples)
+
+Kafka: em Windows, este projeto já configura listeners no `docker-compose.yml` para expor `localhost:9092`. Caso altere portas, mantenha `KAFKA_ADVERTISED_LISTENERS` consistente e atualize `KAFKA_BROKERS`.
 
 ---
 
@@ -189,6 +196,7 @@ Abra terminais separados e siga a ordem recomendada.
    cd components/order-manager
    go run .
    ```
+   - Métricas: expostas em `http://localhost:9094/metrics` (configure `ORDER_MANAGER_METRICS_PORT`).
 2. **Risk Engine (Rust)**
    ```bash
    cd components/risk-engine
@@ -209,8 +217,8 @@ Abra terminais separados e siga a ordem recomendada.
    cd components/coinbase-connector
    # opcional: export COINBASE_PRODUCT_IDS="BTC-USD,ETH-USD"
    # opcional: export CONNECTOR_MAX_MESSAGES=100
-   cargo run
-   ```
+  cargo run
+  ```
 
 Fluxo ponta a ponta:
 1. Connector publica `market-data.trades.coinbase`.
@@ -219,7 +227,7 @@ Fluxo ponta a ponta:
 4. Risk Engine valida limites (consulta Redis se ativado) e chama o Order Manager.
 5. Order Manager envia ordens para a Coinbase e retorna o resultado.
 
-### 7.1 Coinbase Connector — visão rápida
+### 7.1 Coinbase Connector – visão rápida
 - Ciclo principal com backoff exponencial (configurável via `CONNECTOR_BACKOFF_*`) e reconexão automática ao feed.
 - Classificação de mensagens (`match`, `subscriptions`, `heartbeat`, `status`, `error`) com logs específicos.
 - Ping/Pong respondidos automaticamente; mensagens de erro do feed abortam o ciclo e disparam reconexão.
@@ -228,7 +236,64 @@ Fluxo ponta a ponta:
 
 ---
 
-## 8. Verificações e testes
+## 8. Modos de operação: Teste (Paper) e Real
+
+### 8.1 Negociação de Teste (Paper/Sandbox)
+- Objetivo: validar o pipeline sem enviar ordens reais.
+- Opções de fonte de dados:
+  - Injetar mensagens de teste via Strategy Framework:
+    - `cd components/strategy-framework`
+    - `poetry run send-sample --topic market-data.trades.coinbase --symbol BTC-USD --price 10000 --count 5`
+  - Usar o Coinbase Connector em tempo real, mas apenas para consumir dados:
+    - Garanta que NÃO definiu credenciais da Coinbase no `.env`.
+    - Opcional: `CONNECTOR_MAX_MESSAGES=50` para encerrar após N mensagens.
+- Consumidores:
+  - `poetry run python src/run_framework.py` ou `poetry run python src/consumer.py`.
+  - Estes aguardam Kafka/tópico e fazem retry automático quando indisponíveis.
+- Risk Engine e Order Manager:
+  - Podem ser executados juntos; sem credenciais, o Order Manager rejeita submissões, mantendo a simulação segura.
+- Segurança: não configure `COINBASE_API_*` neste modo.
+
+Checklist rápido (teste):
+- `docker compose up -d zookeeper kafka`
+- `docker exec -it kafka kafka-topics --create --topic market-data.trades.coinbase --bootstrap-server localhost:9092 --replication-factor 1 --partitions 1` (ou confie em autocriação)
+- Rodar conector OU `send-sample` para povoar Kafka.
+- Rodar Strategy Framework e observar sinais e chamadas gRPC ao Risk Engine.
+
+### 8.2 Negociação Real (Produção)
+- Aviso: revise o código, limites de risco e endpoint de API antes de ativar. Teste em ambiente de staging.
+- Credenciais obrigatórias no `.env`:
+  - `COINBASE_API_KEY`, `COINBASE_API_SECRET`, `COINBASE_API_PASSPHRASE`.
+- Endpoints:
+  - WebSocket (mercado): `COINBASE_WS_URL=wss://ws-feed.exchange.coinbase.com`.
+  - REST de ordens: use `ORDER_MANAGER_COINBASE_VARIANT`:
+    - `advanced_trade`: endpoint padrão `https://api.coinbase.com` e path `/api/v3/brokerage/orders`, headers `CB-ACCESS-KEY`, `CB-ACCESS-SIGNATURE`, `CB-ACCESS-TIMESTAMP`.
+    - `exchange` (legacy): endpoint padrão `https://api.exchange.coinbase.com` e path `/orders`, headers `CB-ACCESS-KEY`, `CB-ACCESS-SIGN`, `CB-ACCESS-TIMESTAMP`, `CB-ACCESS-PASSPHRASE`.
+    - Override com `COINBASE_API_BASE_URL` se necessário. Para sandbox, defina `ORDER_MANAGER_COINBASE_ENV=sandbox` (para Exchange usa `https://api-public.sandbox.exchange.coinbase.com`; verifique se há sandbox disponível para Advanced Trade).
+- Limites de risco (no Risk Engine):
+  - Limite por ordem (valor nocional), e limite de exposição por ativo, definidos no código (`components/risk-engine/src/main.rs`). Ajuste antes de operar real.
+  - `RISK_USE_REDIS=1` recomendado para persistir posições; configure `REDIS_ADDR`.
+- Ordem de start:
+  1) Order Manager (Go) – porta padrão `0.0.0.0:50052` (ajuste `ORDER_MANAGER_GRPC_ADDR` se necessário).
+  2) Risk Engine (Rust) – ligará ao Order Manager (use `ORDER_MANAGER_ADDR` ou `ORDER_MANAGER_GRPC_ADDR`).
+  3) Kafka (Zookeeper/Kafka) – `docker compose up -d zookeeper kafka`.
+  4) Coinbase Connector (Rust) – produzirá trades para Kafka.
+  5) Strategy Framework (Python) – consumirá `market-data.trades.normalized` (se usar normalizador) ou `market-data.trades.coinbase` diretamente.
+- Segurança operacional:
+  - Comece com tamanhos mínimos (ex.: `quantity` muito pequena no Risk Engine).
+  - Monitore logs e métricas; mantenha alertas para falhas de rede/Kafka.
+  - Proteja `.env` e use secret managers em produção.
+  - Defina `ORDER_MANAGER_MODE=real` apenas quando estiver pronto para enviar ordens reais.
+  - O Order Manager registra `request_id`, `rate_limit_remaining` e `retry_after` quando disponíveis; ajuste `ORDER_MANAGER_HTTP_MAX_RETRIES`/`BACKOFF_MS` conforme a política de rate limit da Coinbase.
+ - Atenção: O segredo de API é tratado como Base64 por padrão; o Order Manager tenta Base64 e Hex automaticamente.
+
+Notas de compatibilidade Coinbase
+- A API “Pro” foi descontinuada; para ambiente real atualize o endpoint e o esquema de autenticação conforme a documentação vigente da Coinbase Exchange/Advanced Trade.
+- Verifique também a disponibilidade de “sandbox” oficial; se ausente, use o modo de teste descrito acima.
+
+---
+
+## 9. Verificações e testes
 - **Kafka**: verifique lag com `kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe --group ots-strategy`.
 - **Conector**:
   ```bash
@@ -250,7 +315,7 @@ Fluxo ponta a ponta:
 
 ---
 
-## 9. Próximos passos
+## 10. Próximos passos
 - Consulte `docs/architecture-overview.md` para entender a topologia completa.
 - Revise `docs/components.md` para detalhes específicos de cada serviço.
 - Planeje deploys com `docs/operations/deployment.md`.
