@@ -99,13 +99,19 @@ cd oasis-trading-system
 2. Edite `.env` e defina:
    - Credenciais Coinbase (`COINBASE_API_KEY`, `COINBASE_API_SECRET`, `COINBASE_API_PASSPHRASE`).
    - Endereços dos serviços (`KAFKA_BROKERS`, `RISK_ENGINE_GRPC_ADDR`, `ORDER_MANAGER_GRPC_ADDR`).
+   - Parâmetros do Coinbase Connector (ver próximos bullet points).
 3. **Nunca** comite o arquivo `.env`. Utilize secret managers em produção.
 
 Principais variáveis:
 - `KAFKA_BROKERS=localhost:9092`
 - `KAFKA_TOPIC=market-data.trades.normalized`
 - `GROUP_ID=ots-strategy`
-- `COINBASE_WS_URL=wss://advanced-trade-ws.coinbase.com`
+- `COINBASE_WS_URL=wss://ws-feed.pro.coinbase.com`
+- `COINBASE_KAFKA_TOPIC=market-data.trades.coinbase`
+- `COINBASE_PRODUCT_IDS=BTC-USD,ETH-USD` (lista separada por vírgula)
+- `COINBASE_CHANNELS=matches`
+- `CONNECTOR_MAX_MESSAGES=` (opcional; vazio = fluxo contínuo)
+- `CONNECTOR_BACKOFF_INITIAL_MS=1000` e `CONNECTOR_BACKOFF_MAX_MS=60000`
 - `RISK_USE_REDIS=1` (use `0` para modo stateless)
 
 ---
@@ -201,6 +207,8 @@ Abra terminais separados e siga a ordem recomendada.
 5. **Coinbase Connector (Rust)**
    ```bash
    cd components/coinbase-connector
+   # opcional: export COINBASE_PRODUCT_IDS="BTC-USD,ETH-USD"
+   # opcional: export CONNECTOR_MAX_MESSAGES=100
    cargo run
    ```
 
@@ -211,11 +219,25 @@ Fluxo ponta a ponta:
 4. Risk Engine valida limites (consulta Redis se ativado) e chama o Order Manager.
 5. Order Manager envia ordens para a Coinbase e retorna o resultado.
 
+### 7.1 Coinbase Connector — visão rápida
+- Ciclo principal com backoff exponencial (configurável via `CONNECTOR_BACKOFF_*`) e reconexão automática ao feed.
+- Classificação de mensagens (`match`, `subscriptions`, `heartbeat`, `status`, `error`) com logs específicos.
+- Ping/Pong respondidos automaticamente; mensagens de erro do feed abortam o ciclo e disparam reconexão.
+- Publicação em Kafka usando `COINBASE_KAFKA_TOPIC`; a key de cada mensagem é o símbolo (`BTC-USD` etc.).
+- Para smoke tests, defina `CONNECTOR_MAX_MESSAGES=5` e verifique a saída antes de desligar.
+
 ---
 
 ## 8. Verificações e testes
 - **Kafka**: verifique lag com `kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe --group ots-strategy`.
-- **Conector**: `cd components/coinbase-connector && cargo test`.
+- **Conector**:
+  ```bash
+  cd components/coinbase-connector
+  cargo fmt --check
+  cargo clippy -- -D warnings
+  cargo test
+  ```
+  > O binário registra mensagens de reconexão e confirmações de assinatura; use `CONNECTOR_MAX_MESSAGES=10` para testes rápidos.
 - **Risk Engine**: `cd components/risk-engine && cargo fmt && cargo clippy && cargo test`.
 - **Strategy Framework**: `cd components/strategy-framework && poetry run pytest`.
 - **Order Manager**: `cd components/order-manager && go test ./...`.

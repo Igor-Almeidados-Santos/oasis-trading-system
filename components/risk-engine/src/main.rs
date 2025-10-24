@@ -39,7 +39,7 @@ struct Position {
 // A struct do nosso serviço agora pode usar Redis (opcional) ou memória
 pub struct RiskValidatorService {
     order_manager_client: OrderExecutorClient<Channel>,
-    redis_client: Option<Arc<Mutex<redis::aio::Connection>>>,
+    redis_client: Option<Arc<Mutex<redis::aio::MultiplexedConnection>>>,
     positions: Arc<Mutex<HashMap<String, Position>>>,
 }
 
@@ -156,7 +156,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let redis_opt = if use_redis {
         info!("A ligar-se ao Redis em {}...", REDIS_ADDR);
         match redis::Client::open(REDIS_ADDR) {
-            Ok(c) => match c.get_async_connection().await {
+            Ok(c) => match c.get_multiplexed_async_connection().await {
                 Ok(conn) => Some(Arc::new(Mutex::new(conn))),
                 Err(e) => { warn!(error = %e, "Não foi possível conectar ao Redis. Usando memória."); None }
             },

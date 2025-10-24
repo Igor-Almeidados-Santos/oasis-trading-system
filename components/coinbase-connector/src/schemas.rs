@@ -6,11 +6,14 @@ use serde::Deserialize;
 #[derive(Deserialize, Debug)]
 pub struct CoinbaseMatch {
     #[serde(rename = "type")]
-    pub msg_type: String,
+    pub _msg_type: String,
     pub trade_id: i64,
-    pub sequence: i64,
-    pub maker_order_id: String,
-    pub taker_order_id: String,
+    #[serde(rename = "sequence")]
+    pub _sequence: i64,
+    #[serde(rename = "maker_order_id")]
+    pub _maker_order_id: String,
+    #[serde(rename = "taker_order_id")]
+    pub _taker_order_id: String,
     pub time: String,
     pub product_id: String,
     pub size: String,
@@ -27,35 +30,35 @@ pub mod proto {
     // Equivalente a: message MarketDataEvent
     #[derive(Clone, prost::Message)]
     pub struct MarketDataEvent {
-        #[prost(message, optional, tag="1")]
+        #[prost(message, optional, tag = "1")]
         pub header: Option<Header>,
-        #[prost(oneof="market_data_event::Payload", tags="2, 3")]
+        #[prost(oneof = "market_data_event::Payload", tags = "2, 3")]
         pub payload: Option<market_data_event::Payload>,
     }
 
     // Equivalente a: message Header
     #[derive(Clone, prost::Message)]
     pub struct Header {
-        #[prost(string, tag="1")]
+        #[prost(string, tag = "1")]
         pub exchange: String,
-        #[prost(string, tag="2")]
+        #[prost(string, tag = "2")]
         pub symbol: String,
-        #[prost(message, optional, tag="3")]
+        #[prost(message, optional, tag = "3")]
         pub exchange_timestamp: Option<Timestamp>,
-        #[prost(message, optional, tag="4")]
+        #[prost(message, optional, tag = "4")]
         pub received_timestamp: Option<Timestamp>,
     }
 
     // Equivalente a: message TradeUpdate
     #[derive(Clone, prost::Message)]
     pub struct TradeUpdate {
-        #[prost(string, tag="1")]
+        #[prost(string, tag = "1")]
         pub trade_id: String,
-        #[prost(string, tag="2")]
+        #[prost(string, tag = "2")]
         pub price: String,
-        #[prost(string, tag="3")]
+        #[prost(string, tag = "3")]
         pub quantity: String,
-        #[prost(string, tag="4")]
+        #[prost(string, tag = "4")]
         pub side: String,
     }
 
@@ -65,7 +68,7 @@ pub mod proto {
             // Não implementado ainda, mas definido no contrato
             // #[prost(message, tag="2")]
             // OrderBookUpdate(super::OrderBookUpdate),
-            #[prost(message, tag="3")]
+            #[prost(message, tag = "3")]
             TradeUpdate(super::TradeUpdate),
         }
     }

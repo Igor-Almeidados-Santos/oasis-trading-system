@@ -1,10 +1,15 @@
 use futures_util::StreamExt;
-use prost::Message as ProstMessage;
+use prost::Message as _;
 use prost_types::Timestamp;
 use rdkafka::config::ClientConfig;
+use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
+use rdkafka::client::DefaultClientContext;
+use rdkafka::error::KafkaError;
+use rdkafka::types::RDKafkaErrorCode;
 use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::message::BorrowedMessage;
 use rdkafka::producer::{FutureProducer, FutureRecord};
+use rdkafka::Message as _;
 use std::time::Duration;
 use tracing::{info, warn};
 
@@ -23,6 +28,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::var("RAW_MARKET_TOPIC").unwrap_or_else(|_| DEFAULT_SOURCE_TOPIC.to_string());
     let target_topic = std::env::var("NORMALIZED_MARKET_TOPIC")
         .unwrap_or_else(|_| DEFAULT_TARGET_TOPIC.to_string());
+
+    ensure_topics(&brokers, &[source_topic.as_str(), target_topic.as_str()]).await?;
 
     let consumer: StreamConsumer = ClientConfig::new()
         .set("bootstrap.servers", &brokers)
@@ -115,7 +122,43 @@ fn now_ts() -> Timestamp {
     now.into()
 }
 
+async fn ensure_topics(
+    brokers: &str,
+    topics: &[&str],
+) -> Result<(), Box<dyn std::error::Error>> {
+    if topics.is_empty() {
+        return Ok(());
+    }
+
+    let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
+        .set("bootstrap.servers", brokers)
+        .create()?;
+
+    let new_topics: Vec<NewTopic> = topics
+        .iter()
+        .map(|topic| NewTopic::new(topic, 1, TopicReplication::Fixed(1)))
+        .collect();
+
+    let opts = AdminOptions::new();
+    match admin.create_topics(&new_topics, &opts).await {
+        Ok(_) => {
+            for topic in topics {
+                info!("Tópico '{}' disponível (criado ou já existente)", topic);
+            }
+        }
+        Err(KafkaError::AdminOp(code)) if code == RDKafkaErrorCode::TopicAlreadyExists => {
+            for topic in topics {
+                info!("Tópico '{}' já existia", topic);
+            }
+        }
+        Err(e) => warn!(error = %e, "Falha ao garantir tópicos"),
+    }
+
+    Ok(())
+}
+
 mod proto {
+    use prost::Message;
     use prost_types::Timestamp;
 
     #[derive(Clone, PartialEq, Message)]
