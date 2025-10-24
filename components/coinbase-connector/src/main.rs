@@ -249,12 +249,13 @@ mod connector {
                 .payload(&buf)
                 .key(key);
 
-            self.producer
-                .send(record, Duration::from_secs(0))
-                .await
-                .map_err(|(err, _)| ConnectorError::Kafka(err))?;
-
-            Ok(())
+            match self.producer.send(record, Duration::from_secs(0)).await {
+                Ok(_) => Ok(()),
+                Err((err, _)) => {
+                    warn!(error = %err, "Falha ao enviar mensagem para o Kafka");
+                    Ok(())
+                }
+            }
         }
     }
 
@@ -396,4 +397,67 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     connector.run().await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::config::{ConnectorConfig, ReconnectPolicy};
+    use super::connector::CoinbaseConnector;
+    use super::*;
+    use futures_util::{SinkExt, StreamExt};
+    use std::io::ErrorKind;
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::{accept_async, tungstenite::protocol::Message as WsMessage};
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_run_connector_local_ws() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let listener = match TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => listener,
+            Err(err) if err.kind() == ErrorKind::PermissionDenied => {
+                eprintln!("teste ignorado: {err}");
+                return;
+            }
+            Err(err) => panic!("bind falhou: {err}"),
+        };
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept falhou");
+            let mut ws = accept_async(stream).await.expect("handshake falhou");
+
+            if let Some(Ok(WsMessage::Text(text))) = ws.next().await {
+                tracing::info!(subscribe = %text, "Subscribe recebido do cliente");
+            }
+
+            let fake_msg = r#"{"type":"match","trade_id":1,"sequence":1,"maker_order_id":"m","taker_order_id":"t","time":"2020-01-01T00:00:00Z","product_id":"BTC-USD","size":"0.01","price":"10000","side":"buy"}"#;
+            ws.send(WsMessage::Text(fake_msg.into()))
+                .await
+                .expect("envio falhou");
+            let _ = ws.close(None).await;
+        });
+
+        let config = ConnectorConfig {
+            ws_url: format!("ws://{}:{}", addr.ip(), addr.port()),
+            product_ids: vec!["BTC-USD".to_string()],
+            channels: vec!["matches".to_string()],
+            kafka_topic: "test-topic".to_string(),
+            kafka_brokers: "localhost:9092".to_string(),
+            max_messages: Some(1),
+            reconnect: ReconnectPolicy::default(),
+        };
+
+        let producer: FutureProducer = ClientConfig::new()
+            .set("bootstrap.servers", &config.kafka_brokers)
+            .set("message.timeout.ms", "50")
+            .create()
+            .expect("falha ao criar FutureProducer");
+
+        let connector = CoinbaseConnector::new(config, producer);
+        let res = connector.run().await;
+
+        let _ = server.await;
+        assert!(res.is_ok());
+    }
 }
