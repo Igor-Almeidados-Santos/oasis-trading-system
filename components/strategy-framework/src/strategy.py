@@ -18,7 +18,7 @@ class Strategy(ABC):
         self.strategy_id = strategy_id
         # --- NOVOS ATRIBUTOS DE ESTADO ---
         self.enabled: bool = True
-        self.mode: actions_pb2.TradingMode = actions_pb2.REAL
+        self.mode: actions_pb2.TradingMode = actions_pb2.PAPER
         log.info(
             "Estratégia '%s' inicializada (Enabled: %s, Mode: %s).",
             self.strategy_id,

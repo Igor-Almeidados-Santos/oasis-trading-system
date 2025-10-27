@@ -16,8 +16,8 @@ export default function LoginPage() {
 
     try {
       // Endereço do nosso API Backend (Go)
-      // Em produção, viria de uma variável de ambiente NEXT_PUBLIC_API_URL
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
+      const apiUrl =
+        process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8081';
       
       const response = await fetch(`${apiUrl}/api/v1/auth/login`, {
         method: 'POST',
@@ -35,19 +35,20 @@ export default function LoginPage() {
       const data = await response.json();
       
       // --- Gestão do Token JWT ---
-      if (data.access_token) {
+      if (data.token) {
         // Guarda o token no localStorage (Simples, mas vulnerável a XSS)
         // Em produção, considerar HttpOnly cookies ou gestão mais segura.
-        localStorage.setItem('accessToken', data.access_token);
-        
+        localStorage.setItem('accessToken', data.token);
+        localStorage.setItem('username', username);
+
         // Redireciona para o dashboard após login bem-sucedido
         router.push('/dashboard');
       } else {
         throw new Error('Token não recebido');
       }
 
-    } catch (err: any) {
-      setError(err.message || 'Ocorreu um erro desconhecido.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Ocorreu um erro desconhecido.');
     }
   };
 

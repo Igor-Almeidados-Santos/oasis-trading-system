@@ -24,3 +24,4 @@ grpcio-tools = "^1.62.0"
 [tool.poetry.scripts]
 gen-proto = "tools.gen_proto:main"
 send-sample = "tools.send_sample:main"
+set-strategy-config = "tools.set_strategy_config:main"

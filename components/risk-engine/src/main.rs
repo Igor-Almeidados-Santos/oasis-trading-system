@@ -1,23 +1,27 @@
-use tonic::{transport::{Channel, Server}, Request, Response, Status};
-use tracing::{info, warn};
+use bigdecimal::BigDecimal;
 use contracts::{
-    risk_validator_server::{RiskValidator, RiskValidatorServer},
     order_executor_client::OrderExecutorClient,
+    risk_validator_server::{RiskValidator, RiskValidatorServer},
     OrderRequest, SignalValidationResponse, TradingSignal,
 };
 use redis::AsyncCommands; // <-- NOVO
+use std::collections::HashMap;
+use std::convert::TryFrom;
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use bigdecimal::BigDecimal;
-use std::str::FromStr;
-use std::collections::HashMap;
+use tonic::{
+    transport::{Channel, Server},
+    Request, Response, Status,
+};
+use tracing::{info, warn};
 
 // Importa o código gRPC gerado
 pub mod contracts {
     tonic::include_proto!("trading.contracts");
 }
 
-const ORDER_MANAGER_ADDR: &str = "http://127.0.0.1:50052";
+const ORDER_MANAGER_ADDR: &str = "http://[::1]:50052";
 const REDIS_ADDR: &str = "redis://127.0.0.1/";
 
 // --- Definição dos Nossos Limites de Risco ---
@@ -53,6 +57,8 @@ impl RiskValidator for RiskValidatorService {
         info!(strategy_id = %signal.strategy_id, symbol = %signal.symbol, "Sinal recebido para validação");
 
         // --- LÓGICA DE RISCO REAL ---
+        let signal_mode =
+            contracts::TradingMode::try_from(signal.mode).unwrap_or(contracts::TradingMode::Real);
 
         // 1. Criar a Ordem Proposta (ainda com valores placeholder)
         let order_request = OrderRequest {
@@ -63,6 +69,7 @@ impl RiskValidator for RiskValidatorService {
             quantity: "0.0001".to_string(), // Exemplo: 0.0001 BTC
             price: "60000.0".to_string(),   // Exemplo: $60,000
             strategy_id: signal.strategy_id.clone(),
+            mode: signal_mode as i32,
         };
 
         // 2. Validar Limite da Ordem
@@ -80,23 +87,37 @@ impl RiskValidator for RiskValidatorService {
         }
 
         // 3. Validar Limite de Posição (a lógica mais complexa)
-        let position_key = format!("position:{}", signal.symbol);
+        let position_namespace = match signal_mode {
+            contracts::TradingMode::Paper => "position:paper",
+            _ => "position:live",
+        };
+        let position_key = format!("{}:{}", position_namespace, signal.symbol);
         // Carrega a posição de Redis (se disponível) ou do armazenamento em memória
         let mut position: Position = if let Some(ref rc) = self.redis_client {
             let mut conn = rc.lock().await;
-            let pos_json: String = conn.get(&position_key).await.unwrap_or_else(|_| "null".to_string());
+            let pos_json: String = conn
+                .get(&position_key)
+                .await
+                .unwrap_or_else(|_| "null".to_string());
             serde_json::from_str(&pos_json).unwrap_or_default()
         } else {
             let map = self.positions.lock().await;
-            map.get(&signal.symbol).cloned().unwrap_or_default()
+            map.get(&position_key).cloned().unwrap_or_default()
         };
+        if position.symbol.is_empty() {
+            position.symbol = signal.symbol.clone();
+        }
 
         // Calcula a nova posição *hipotética*
-        let new_qty = if signal.side == "BUY" { &position.quantity + &qty } else { &position.quantity - &qty };
+        let new_qty = if signal.side == "BUY" {
+            &position.quantity + &qty
+        } else {
+            &position.quantity - &qty
+        };
         let new_notional = &new_qty * &price; // Valor financeiro da nova posição
 
         if new_notional.abs() > *MAX_POSITION_NOTIONAL {
-             warn!(new_notional = %new_notional, "REJEITADO: Posição excede o limite");
+            warn!(new_notional = %new_notional, "REJEITADO: Posição excede o limite");
             return Ok(Response::new(SignalValidationResponse {
                 approved: false,
                 reason: "MAX_POSITION_EXPOSURE_EXCEEDED".to_string(),
@@ -108,9 +129,12 @@ impl RiskValidator for RiskValidatorService {
 
         // Se chegou aqui, a ordem foi APROVADA
         info!(client_order_id = %order_request.client_order_id, "Sinal APROVADO. A enviar para OrderManager...");
-        
+
         let mut client = self.order_manager_client.clone();
-        match client.execute_order(Request::new(order_request.clone())).await {
+        match client
+            .execute_order(Request::new(order_request.clone()))
+            .await
+        {
             Ok(_) => {
                 // SUCESSO! Atualiza a posição (Redis ou memória)
                 position.quantity = new_qty;
@@ -120,7 +144,7 @@ impl RiskValidator for RiskValidatorService {
                     let _: () = conn.set(&position_key, new_pos_json).await.unwrap();
                 } else {
                     let mut map = self.positions.lock().await;
-                    map.insert(signal.symbol.clone(), position.clone());
+                    map.insert(position_key.clone(), position.clone());
                 }
 
                 Ok(Response::new(SignalValidationResponse {
@@ -145,7 +169,7 @@ impl RiskValidator for RiskValidatorService {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
     let addr = "[::1]:50051".parse()?;
-    
+
     // Conexão com o OrderManager (suporta ORDER_MANAGER_ADDR ou ORDER_MANAGER_GRPC_ADDR)
     let mut order_manager_addr = std::env::var("ORDER_MANAGER_ADDR")
         .or_else(|_| std::env::var("ORDER_MANAGER_GRPC_ADDR"))
@@ -163,11 +187,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         match redis::Client::open(REDIS_ADDR) {
             Ok(c) => match c.get_multiplexed_async_connection().await {
                 Ok(conn) => Some(Arc::new(Mutex::new(conn))),
-                Err(e) => { warn!(error = %e, "Não foi possível conectar ao Redis. Usando memória."); None }
+                Err(e) => {
+                    warn!(error = %e, "Não foi possível conectar ao Redis. Usando memória.");
+                    None
+                }
             },
-            Err(e) => { warn!(error = %e, "Falha ao criar cliente Redis. Usando memória."); None }
+            Err(e) => {
+                warn!(error = %e, "Falha ao criar cliente Redis. Usando memória.");
+                None
+            }
         }
-    } else { info!("RISK_USE_REDIS=0 - armazenamento em memória"); None };
+    } else {
+        info!("RISK_USE_REDIS=0 - armazenamento em memória");
+        None
+    };
     let positions: Arc<Mutex<HashMap<String, Position>>> = Default::default();
 
     // Injeta dependências no nosso serviço

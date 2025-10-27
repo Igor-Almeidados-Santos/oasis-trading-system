@@ -4,12 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strings"
+	"syscall"
 	"time"
 
+	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis/v8"
 	"github.com/golang-jwt/jwt/v5"
@@ -20,7 +24,11 @@ import (
 )
 
 // --- Constantes ---
-const controlCommandTopic = "control.commands"
+const (
+	controlCommandTopic     = "control.commands"
+	botStatusKey            = "control:bot_status"
+	strategyConfigKeyPrefix = "control:strategy:"
+)
 
 // --- Estruturas de Dados ---
 
@@ -218,6 +226,22 @@ func main() {
 
 	router := gin.Default()
 
+	corsOrigins := strings.Split(os.Getenv("CONTROL_CENTER_ALLOWED_ORIGINS"), ",")
+	if len(corsOrigins) == 1 && corsOrigins[0] == "" {
+		corsOrigins = []string{
+			"http://localhost:3000",
+			"http://localhost:3001",
+		}
+	}
+	router.Use(cors.New(cors.Config{
+		AllowOrigins:     corsOrigins,
+		AllowMethods:     []string{"GET", "POST", "OPTIONS"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization"},
+		ExposeHeaders:    []string{"Content-Length"},
+		AllowCredentials: true,
+		MaxAge:           12 * time.Hour,
+	}))
+
 	router.POST("/api/v1/auth/login", func(c *gin.Context) {
 		var req LoginRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
@@ -250,6 +274,7 @@ func main() {
 	{
 		apiV1.GET("/portfolio", handler.getPortfolio)
 		apiV1.GET("/operations", handler.getOperations)
+		apiV1.GET("/control/state", handler.getControlState)
 		apiV1.POST("/bot/status", handler.setBotStatus)
 		apiV1.POST("/strategies/:strategy_id/toggle", handler.setStrategyConfig)
 	}
@@ -258,8 +283,22 @@ func main() {
 	if port == "" {
 		port = "8080"
 	}
-	log.Printf("Control Center API a ouvir em :%s", port)
-	if err := router.Run(":" + port); err != nil {
+	listener, err := net.Listen("tcp", ":"+port)
+	if err != nil {
+		if errors.Is(err, syscall.EADDRINUSE) {
+			log.Printf("Porta :%s em uso, a procurar porta livre.", port)
+			listener, err = net.Listen("tcp", ":0")
+			if err != nil {
+				log.Fatalf("Falha ao iniciar servidor: %v", err)
+			}
+		} else {
+			log.Fatalf("Falha ao iniciar servidor: %v", err)
+		}
+	}
+
+	actualPort := listener.Addr().(*net.TCPAddr).Port
+	log.Printf("Control Center API a ouvir em :%d", actualPort)
+	if err := router.RunListener(listener); err != nil {
 		log.Fatalf("Falha ao iniciar servidor: %v", err)
 	}
 }
@@ -402,6 +441,10 @@ func (h *ApiHandler) setBotStatus(c *gin.Context) {
 		return
 	}
 
+	if err := h.redisClient.Set(context.Background(), botStatusKey, status, 0).Err(); err != nil {
+		log.Printf("Aviso: não foi possível persistir estado do bot no Redis: %v", err)
+	}
+
 	log.Printf("Comando SET_BOT_STATUS (%s) publicado", status)
 	c.JSON(http.StatusAccepted, gin.H{"message": "Comando aceite"})
 }
@@ -444,5 +487,69 @@ func (h *ApiHandler) setStrategyConfig(c *gin.Context) {
 	}
 
 	log.Printf("Comando SET_STRATEGY_CONFIG para %s (Enabled: %t, Mode: %s) publicado", strategyID, *req.Enabled, req.Mode)
+
+	stateKey := fmt.Sprintf("%s%s", strategyConfigKeyPrefix, strings.ToLower(strategyID))
+	if payloadJSON, err := json.Marshal(command.Payload); err == nil {
+		if err := h.redisClient.Set(context.Background(), stateKey, payloadJSON, 0).Err(); err != nil {
+			log.Printf("Aviso: não foi possível persistir config da estratégia %s: %v", strategyID, err)
+		}
+	} else {
+		log.Printf("Aviso: falha ao serializar config para armazenamento local: %v", err)
+	}
+
 	c.JSON(http.StatusAccepted, gin.H{"message": "Comando aceite"})
+}
+
+func (h *ApiHandler) getControlState(c *gin.Context) {
+	type strategyState struct {
+		StrategyID string `json:"strategy_id"`
+		Enabled    bool   `json:"enabled"`
+		Mode       string `json:"mode"`
+	}
+	type controlState struct {
+		BotStatus  string          `json:"bot_status"`
+		Strategies []strategyState `json:"strategies"`
+	}
+
+	ctx := context.Background()
+	botStatus, err := h.redisClient.Get(ctx, botStatusKey).Result()
+	if err == redis.Nil {
+		botStatus = "UNKNOWN"
+	} else if err != nil {
+		log.Printf("Erro ao ler estado do bot: %v", err)
+		botStatus = "UNKNOWN"
+	}
+
+	var strategies []strategyState
+	iter := h.redisClient.Scan(ctx, 0, strategyConfigKeyPrefix+"*", 0).Iterator()
+	for iter.Next(ctx) {
+		key := iter.Val()
+		val, err := h.redisClient.Get(ctx, key).Result()
+		if err != nil {
+			log.Printf("Erro ao ler config da estratégia (%s): %v", key, err)
+			continue
+		}
+		var payload SetStrategyConfigPayload
+		if err := json.Unmarshal([]byte(val), &payload); err != nil {
+			log.Printf("Erro ao deserializar config (%s): %v", key, err)
+			continue
+		}
+
+		strategyID := strings.TrimPrefix(key, strategyConfigKeyPrefix)
+		strategies = append(strategies, strategyState{
+			StrategyID: strategyID,
+			Enabled:    payload.Enabled,
+			Mode:       payload.Mode,
+		})
+	}
+	if err := iter.Err(); err != nil {
+		log.Printf("Erro ao iterar configs de estratégias: %v", err)
+	}
+
+	state := controlState{
+		BotStatus:  botStatus,
+		Strategies: strategies,
+	}
+
+	c.JSON(http.StatusOK, state)
 }
