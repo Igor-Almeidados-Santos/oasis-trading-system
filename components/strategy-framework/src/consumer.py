@@ -1,148 +1,275 @@
 import os
 import asyncio
 import logging
+import json
 import grpc
-from confluent_kafka import Consumer, KafkaError, KafkaException
+from confluent_kafka import Consumer, KafkaError
 from dotenv import load_dotenv
 
 # Imports gerados (com fallback para imports absolutos)
 try:
-    from generated import market_data_pb2, actions_pb2_grpc
-except ImportError:  # fallback quando actions_pb2_grpc usa imports absolutos
+    from generated import market_data_pb2, actions_pb2, actions_pb2_grpc
+except ImportError:  # fallback quando os módulos gerados usam caminhos absolutos
     import sys
     from pathlib import Path
+
     gen_dir = Path(__file__).resolve().parent / "generated"
     sys.path.insert(0, str(gen_dir))
     import market_data_pb2  # type: ignore
+    import actions_pb2  # type: ignore
     import actions_pb2_grpc  # type: ignore
 
 from strategies.momentum import SimpleMomentum
 
-# Métricas Prometheus (opcional)
+# Métricas Prometheus (mantém fallback quando o pacote não está disponível)
 try:
     from prometheus_client import start_http_server, Counter
 except Exception:
     def start_http_server(_port: int):
         pass
+
     class Counter:
         def __init__(self, *args, **kwargs):
             pass
+
         def labels(self, **kwargs):
             return self
+
         def inc(self, *args, **kwargs):
             pass
 
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 log = logging.getLogger(__name__)
 
 load_dotenv()
 
+# --- Configuração ---
 KAFKA_BROKERS = os.getenv("KAFKA_BROKERS", "localhost:9092")
-KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "market-data.trades.normalized")
-GROUP_ID = "strategy-framework-group"
+MARKET_DATA_TOPIC = os.getenv("MARKET_DATA_TOPIC", "market-data.trades.coinbase")
+CONTROL_COMMAND_TOPIC = os.getenv("CONTROL_COMMAND_TOPIC", "control.commands")
+GROUP_ID = os.getenv("STRATEGY_CONSUMER_GROUP", "strategy-framework-group")
 RISK_ENGINE_ADDRESS = os.getenv("RISK_ENGINE_GRPC_ADDR", "localhost:50051")
 METRICS_PORT = int(os.getenv("STRATEGY_METRICS_PORT", 9092))
 FRAMEWORK_KAFKA_CHECK_ATTEMPTS = int(os.getenv("FRAMEWORK_KAFKA_CHECK_ATTEMPTS", "12"))
 FRAMEWORK_KAFKA_CHECK_BACKOFF_MS = int(os.getenv("FRAMEWORK_KAFKA_CHECK_BACKOFF_MS", "5000"))
 
-# Métricas
-TRADES_PROCESSED = Counter('strategy_trades_processed_total', 'Total de trades processados', ['symbol'])
-SIGNALS_GENERATED = Counter('strategy_signals_generated_total', 'Total de sinais gerados', ['strategy_id', 'symbol', 'side'])
-SIGNAL_VALIDATION_RESULT = Counter('strategy_signal_validation_result_total', 'Resultado da validação', ['strategy_id', 'status'])
+# --- Métricas ---
+TRADES_PROCESSED = Counter("strategy_trades_processed_total", "Total de trades processados", ["symbol"])
+SIGNALS_GENERATED = Counter(
+    "strategy_signals_generated_total", "Total de sinais gerados", ["strategy_id", "symbol", "side"]
+)
+SIGNAL_VALIDATION_RESULT = Counter(
+    "strategy_signal_validation_result_total", "Resultado da validação", ["strategy_id", "status"]
+)
+
+# --- Estado Global do Bot ---
+bot_status = "RUNNING"
+active_strategies: dict[str, SimpleMomentum] = {}
 
 
-async def run_consumer() -> None:
-    # Exposição de métricas (se disponível)
+async def consume_control_commands(command_consumer: Consumer) -> None:
+    """Processa comandos de controlo recebidos via Kafka."""
+    global bot_status
+
+    log.info("Consumidor de comandos iniciado no tópico '%s'...", CONTROL_COMMAND_TOPIC)
     try:
-        start_http_server(METRICS_PORT)
-        log.info(f"Métricas Prometheus em :{METRICS_PORT}")
-    except Exception as e:
-        log.warning(f"Métricas desativadas: {e}")
-
-    # Configura Kafka Consumer
-    conf = {
-        'bootstrap.servers': KAFKA_BROKERS,
-        'group.id': GROUP_ID,
-        'auto.offset.reset': 'latest',
-    }
-    consumer = Consumer(conf)
-
-    # Cliente gRPC (aio)
-    channel = grpc.aio.insecure_channel(RISK_ENGINE_ADDRESS)
-    risk_stub = actions_pb2_grpc.RiskValidatorStub(channel)
-
-    # Estratégia
-    strategy = SimpleMomentum('simple-momentum', os.environ.get('SYMBOL', 'BTC-USD'))
-    log.info(f"Estratégia '{strategy.strategy_id}' inicializada.")
-    log.info(f"Consumidor Kafka pronto. Tópico='{KAFKA_TOPIC}'")
-
-    # Aguarda Kafka e disponibilidade do tópico antes de subscrever
-    if not await wait_for_kafka_topic(consumer, KAFKA_TOPIC, FRAMEWORK_KAFKA_CHECK_ATTEMPTS, FRAMEWORK_KAFKA_CHECK_BACKOFF_MS):
-        log.error("Kafka/tópico indisponível após tentativas. Encerrando.")
-        consumer.close()
-        return
-
-    try:
-        consumer.subscribe([KAFKA_TOPIC])
+        command_consumer.subscribe([CONTROL_COMMAND_TOPIC])
         while True:
-            msg = consumer.poll(1.0)
+            msg = command_consumer.poll(1.0)
             if msg is None:
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(0.5)
                 continue
 
             if msg.error():
-                if msg.error().code() == KafkaError._PARTITION_EOF:
-                    continue
-                if msg.error().code() == KafkaError.UNKNOWN_TOPIC_OR_PART:
-                    log.warning("Tópico ainda não disponível. Aguardando...")
-                    await asyncio.sleep(1.0)
-                    continue
-                raise KafkaException(msg.error())
+                if msg.error().code() != KafkaError._PARTITION_EOF:
+                    log.error("[Comandos] Erro Kafka: %s", msg.error())
+                continue
 
-            # Deserialize Protobuf
-            mde = market_data_pb2.MarketDataEvent()
-            mde.ParseFromString(msg.value())
+            try:
+                command_data = json.loads(msg.value().decode("utf-8"))
+                command = command_data.get("command")
+                payload = command_data.get("payload", {})
+                log.info("[Comandos] Recebido comando '%s' com payload %s", command, payload)
 
-            if mde.WhichOneof('payload') == 'trade_update':
-                trade = mde.trade_update
-                header = mde.header
-                TRADES_PROCESSED.labels(symbol=header.symbol).inc()
+                if command == "SET_BOT_STATUS":
+                    new_status = payload.get("status", "").upper()
+                    if new_status in {"RUNNING", "STOPPED"}:
+                        if bot_status != new_status:
+                            bot_status = new_status
+                            log.warning("Estado global do bot alterado para: %s", bot_status)
+                    else:
+                        log.error("[Comandos] Estado inválido recebido: %s", new_status)
 
-                signals = await strategy.on_trade(trade, header)
-                for s in signals:
-                    SIGNALS_GENERATED.labels(strategy_id=s.strategy_id, symbol=s.symbol, side=s.side).inc()
-                    try:
-                        resp = await risk_stub.ValidateSignal(s)
-                        if resp.approved:
-                            SIGNAL_VALIDATION_RESULT.labels(strategy_id=s.strategy_id, status='approved').inc()
-                            log.warning(f"SINAL APROVADO: {resp.order_request.client_order_id}")
-                        else:
-                            SIGNAL_VALIDATION_RESULT.labels(strategy_id=s.strategy_id, status='rejected').inc()
-                            log.warning(f"SINAL REJEITADO: {resp.reason}")
-                    except grpc.aio.AioRpcError as e:
-                        SIGNAL_VALIDATION_RESULT.labels(strategy_id=s.strategy_id, status='error').inc()
-                        log.error(f"Erro gRPC RiskEngine: {e}")
+                elif command == "SET_STRATEGY_CONFIG":
+                    strategy_id = payload.get("strategy_id")
+                    enabled = payload.get("enabled")
+                    mode = payload.get("mode")
+
+                    strategy = active_strategies.get(strategy_id)
+                    if strategy is None:
+                        log.error("[Comandos] Estratégia desconhecida: %s", strategy_id)
+                        continue
+
+                    if enabled is not None:
+                        strategy.set_enabled(bool(enabled))
+
+                    if mode is not None:
+                        try:
+                            strategy.set_mode(mode)
+                        except ValueError:
+                            log.error("[Comandos] Modo inválido recebido para '%s': %s", strategy_id, mode)
+
+                else:
+                    log.error("[Comandos] Tipo de comando desconhecido: %s", command)
+
+            except json.JSONDecodeError:
+                log.error("[Comandos] Mensagem inválida (não JSON) recebida.")
+            except Exception as err:  # noqa: BLE001
+                log.exception("[Comandos] Erro inesperado ao processar comando: %s", err)
     finally:
-        consumer.close()
-        log.info("Consumidor Kafka encerrado.")
+        command_consumer.close()
+        log.info("Consumidor de comandos encerrado.")
 
 
-if __name__ == '__main__':
-    asyncio.run(run_consumer())
+async def run_market_data_consumer(
+    market_consumer: Consumer, risk_stub: actions_pb2_grpc.RiskValidatorStub
+) -> None:
+    """Processa eventos de mercado e gera sinais para validação."""
+    global bot_status, active_strategies
+
+    log.info("Consumidor de dados de mercado iniciado no tópico '%s'...", MARKET_DATA_TOPIC)
+    try:
+        market_consumer.subscribe([MARKET_DATA_TOPIC])
+        while True:
+            if bot_status == "STOPPED":
+                await asyncio.sleep(1.0)
+                continue
+
+            msg = market_consumer.poll(1.0)
+            if msg is None:
+                await asyncio.sleep(0.1)
+                continue
+
+            if msg.error():
+                if msg.error().code() != KafkaError._PARTITION_EOF:
+                    log.error("[Mercado] Erro Kafka: %s", msg.error())
+                continue
+
+            market_data_event = market_data_pb2.MarketDataEvent()
+            market_data_event.ParseFromString(msg.value())
+
+            if market_data_event.WhichOneof("payload") != "trade_update":
+                continue
+
+            trade = market_data_event.trade_update
+            header = market_data_event.header
+            TRADES_PROCESSED.labels(symbol=header.symbol).inc()
+
+            for strategy_id, strategy in active_strategies.items():
+                signals = await strategy.on_trade(trade, header)
+                if not signals:
+                    continue
+
+                for signal in signals:
+                    SIGNALS_GENERATED.labels(
+                        strategy_id=signal.strategy_id,
+                        symbol=signal.symbol,
+                        side=signal.side,
+                    ).inc()
+                    log.info(
+                        "Sinal gerado (%s) por '%s', enviando para validação...",
+                        actions_pb2.TradingMode.Name(signal.mode),
+                        strategy_id,
+                    )
+                    try:
+                        validation_response = await risk_stub.ValidateSignal(signal)
+                    except grpc.aio.AioRpcError as err:
+                        SIGNAL_VALIDATION_RESULT.labels(strategy_id=strategy_id, status="error").inc()
+                        log.error("Erro ao validar sinal com RiskEngine: %s", err)
+                        continue
+
+                    if validation_response.approved:
+                        SIGNAL_VALIDATION_RESULT.labels(strategy_id=strategy_id, status="approved").inc()
+                        client_order_id = validation_response.order_request.client_order_id
+                        log.warning("SINAL APROVADO (%s): %s", strategy_id, client_order_id)
+                    else:
+                        SIGNAL_VALIDATION_RESULT.labels(strategy_id=strategy_id, status="rejected").inc()
+                        log.warning("SINAL REJEITADO (%s): %s", strategy_id, validation_response.reason)
+    finally:
+        market_consumer.close()
+        log.info("Consumidor de dados de mercado encerrado.")
+
+
+async def main() -> None:
+    global active_strategies
+
+    # Configura consumidores
+    common_conf = {"bootstrap.servers": KAFKA_BROKERS, "group.id": GROUP_ID}
+    market_consumer_conf = {**common_conf, "auto.offset.reset": "latest"}
+    command_consumer_conf = {**common_conf, "auto.offset.reset": "earliest"}
+
+    market_consumer = Consumer(market_consumer_conf)
+    command_consumer = Consumer(command_consumer_conf)
+
+    # Aguarda disponibilidade dos tópicos (se configurado)
+    if not await wait_for_kafka_topic(
+        market_consumer, MARKET_DATA_TOPIC, FRAMEWORK_KAFKA_CHECK_ATTEMPTS, FRAMEWORK_KAFKA_CHECK_BACKOFF_MS
+    ):
+        log.error("Tópico de mercado indisponível. Encerrando inicialização.")
+        market_consumer.close()
+        command_consumer.close()
+        return
+
+    if CONTROL_COMMAND_TOPIC:
+        await wait_for_kafka_topic(
+            command_consumer, CONTROL_COMMAND_TOPIC, FRAMEWORK_KAFKA_CHECK_ATTEMPTS, FRAMEWORK_KAFKA_CHECK_BACKOFF_MS
+        )
+
+    # Cliente gRPC
+    channel = grpc.aio.insecure_channel(RISK_ENGINE_ADDRESS)
+    risk_stub = actions_pb2_grpc.RiskValidatorStub(channel)
+
+    # Servidor de métricas
+    try:
+        start_http_server(METRICS_PORT)
+        log.info("Servidor Prometheus na porta %d", METRICS_PORT)
+    except OSError as err:
+        log.error("Falha ao iniciar servidor Prometheus: %s", err)
+
+    # Carrega estratégias iniciais
+    strategy = SimpleMomentum(strategy_id="momentum-001", symbol_to_watch=os.getenv("SYMBOL", "BTC-USD"))
+    active_strategies[strategy.strategy_id] = strategy
+    log.info("Estratégia '%s' carregada.", strategy.strategy_id)
+
+    # Inicia tarefas
+    market_task = asyncio.create_task(run_market_data_consumer(market_consumer, risk_stub))
+    command_task = asyncio.create_task(consume_control_commands(command_consumer))
+
+    try:
+        await asyncio.gather(market_task, command_task)
+    except KeyboardInterrupt:
+        log.info("Desligamento solicitado pelo utilizador.")
+    finally:
+        await channel.close()
+        log.info("Canal gRPC encerrado.")
 
 
 async def wait_for_kafka_topic(consumer: Consumer, topic: str, attempts: int, backoff_ms: int) -> bool:
-    for i in range(1, attempts + 1):
+    """Verifica se um tópico Kafka existe e está disponível antes de subscrever."""
+    for attempt in range(1, attempts + 1):
         try:
-            md = consumer.list_topics(topic, timeout=3.0)
-            tmd = md.topics.get(topic)
-            if tmd is not None and tmd.error is None:
-                log.info("Conectividade Kafka OK e tópico '%s' disponível (tentativa %d)", topic, i)
+            metadata = consumer.list_topics(topic, timeout=3.0)
+            topic_md = metadata.topics.get(topic)
+            if topic_md is not None and topic_md.error is None:
+                log.info("Tópico '%s' disponível (tentativa %d).", topic, attempt)
                 return True
-            else:
-                log.warning("Kafka OK, mas tópico '%s' ainda indisponível (tentativa %d)", topic, i)
-        except Exception as e:
-            log.warning("Falha ao obter metadata do Kafka (tentativa %d): %s", i, e)
+            log.warning("Tópico '%s' indisponível (tentativa %d).", topic, attempt)
+        except Exception as err:  # noqa: BLE001
+            log.warning("Falha ao obter metadata do Kafka (tentativa %d): %s", attempt, err)
         await asyncio.sleep(backoff_ms / 1000.0)
     return False
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

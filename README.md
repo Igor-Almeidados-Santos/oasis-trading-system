@@ -7,6 +7,12 @@ Coinbase WS --> Coinbase Connector (Rust) --Kafka--> Data Normalizer (Rust) --Ka
                                                                                      |
                                                                                      v
                                                                                Risk Engine (Rust) --gRPC--> Order Manager (Go) --> Coinbase REST
+
+Control Center Web (Next.js) --> Control Center API (Go) --Redis--> Portfolio cache
+                                                  \                   ^
+                                                   \--PostgreSQL--> Operations feed
+                                                     \
+                                                      -->Kafka control.commands --> Strategy Framework (Python)
 ```
 
 ## Sumário
@@ -106,6 +112,7 @@ Principais variáveis:
 - `KAFKA_BROKERS=localhost:9092`
 - `KAFKA_TOPIC=market-data.trades.normalized`
 - `GROUP_ID=ots-strategy`
+- `CONTROL_COMMAND_TOPIC=control.commands`
 - `COINBASE_WS_URL=wss://ws-feed.exchange.coinbase.com`
 - `COINBASE_KAFKA_TOPIC=market-data.trades.coinbase`
 - `COINBASE_PRODUCT_IDS=BTC-USD,ETH-USD` (lista separada por vírgula)
@@ -118,6 +125,13 @@ Principais variáveis:
 - `ORDER_MANAGER_COINBASE_VARIANT=advanced_trade|exchange` (define esquema de autenticação e paths)
 - `ORDER_MANAGER_COINBASE_ENV=prod|sandbox` (se `COINBASE_API_BASE_URL` não for definido, escolhe um base URL padrão)
 - `ORDER_MANAGER_HTTP_MAX_RETRIES=3` e `ORDER_MANAGER_HTTP_BACKOFF_MS=500` (retries de 429/5xx com backoff exponencial simples)
+
+Variáveis específicas do Control Center:
+- `CONTROL_CENTER_API_PORT=8080`
+- `CONTROL_CENTER_API_USER=admin` e `CONTROL_CENTER_API_PASSWORD=changeme` (defina credenciais reais)
+- `JWT_SECRET=` (obrigatório em produção; fallback `dev-secret` apenas para desenvolvimento)
+- `REDIS_ADDR=redis://localhost:6379/0` (fonte de portfólio)
+- `DATABASE_URL=postgres://user:pass@localhost:5432/oasis` (fonte de operações/fills)
 
 Kafka: em Windows, este projeto já configura listeners no `docker-compose.yml` para expor `localhost:9092`. Caso altere portas, mantenha `KAFKA_ADVERTISED_LISTENERS` consistente e atualize `KAFKA_BROKERS`.
 
@@ -219,6 +233,19 @@ Abra terminais separados e siga a ordem recomendada.
    # opcional: export CONNECTOR_MAX_MESSAGES=100
   cargo run
   ```
+6. **Control Center API Backend (Go)**
+   ```bash
+   cd control-center/api-backend
+   go run .
+   ```
+   - Requer Redis, PostgreSQL e Kafka acessíveis. Quando a porta configurada estiver ocupada, o serviço escolhe automaticamente uma porta livre e registra no log.
+7. **Control Center Frontend (Next.js)**
+   ```bash
+   cd control-center/frontend
+   npm install
+   npm run dev
+   ```
+   - Configure `NEXT_PUBLIC_API_BASE_URL` (no `.env.local`) apontando para o backend.
 
 Fluxo ponta a ponta:
 1. Connector publica `market-data.trades.coinbase`.
@@ -226,6 +253,8 @@ Fluxo ponta a ponta:
 3. Strategy Framework gera sinais e chama o Risk Engine.
 4. Risk Engine valida limites (consulta Redis se ativado) e chama o Order Manager.
 5. Order Manager envia ordens para a Coinbase e retorna o resultado.
+6. Control Center API agrega portfólio (Redis), operações (PostgreSQL) e publica comandos no Kafka `control.commands`.
+7. Strategy Framework consome `control.commands` para pausar o bot, ativar/desativar estratégias e alternar o modo (REAL/PAPER).
 
 ### 7.1 Coinbase Connector – visão rápida
 - Ciclo principal com backoff exponencial (configurável via `CONNECTOR_BACKOFF_*`) e reconexão automática ao feed.
@@ -306,6 +335,13 @@ Notas de compatibilidade Coinbase
 - **Risk Engine**: `cd components/risk-engine && cargo fmt && cargo clippy && cargo test`.
 - **Strategy Framework**: `cd components/strategy-framework && poetry run pytest`.
 - **Order Manager**: `cd components/order-manager && go test ./...`.
+- **Control Center API**:
+  ```bash
+  cd control-center/api-backend
+  go test ./...
+  curl -H "Authorization: Bearer <token>" http://localhost:8080/api/v1/portfolio
+  ```
+  > Use `/api/v1/auth/login` para obter um token JWT antes de consultar endpoints protegidos.
 - **Mensagens de teste**:
   ```bash
   cd components/strategy-framework

@@ -2,10 +2,7 @@
 
 from abc import ABC, abstractmethod
 import logging
-
-# Importamos as nossas mensagens Protobuf geradas
-from generated import market_data_pb2
-from generated import actions_pb2 # Assumindo que actions.proto também será gerado
+from generated import market_data_pb2, actions_pb2
 
 log = logging.getLogger(__name__)
 
@@ -19,7 +16,15 @@ class Strategy(ABC):
 
     def __init__(self, strategy_id: str):
         self.strategy_id = strategy_id
-        log.info(f"Estratégia '{self.strategy_id}' inicializada.")
+        # --- NOVOS ATRIBUTOS DE ESTADO ---
+        self.enabled: bool = True
+        self.mode: actions_pb2.TradingMode = actions_pb2.REAL
+        log.info(
+            "Estratégia '%s' inicializada (Enabled: %s, Mode: %s).",
+            self.strategy_id,
+            self.enabled,
+            actions_pb2.TradingMode.Name(self.mode),
+        )
 
     @abstractmethod
     async def on_trade(
@@ -36,3 +41,23 @@ class Strategy(ABC):
             Uma lista de TradingSignal (pode estar vazia se nenhuma ação for necessária).
         """
         pass
+
+    # --- NOVOS MÉTODOS PARA CONTROLO ---
+    def set_enabled(self, enabled: bool):
+        if self.enabled != enabled:
+            self.enabled = enabled
+            log.warning(
+                "Estratégia '%s' alterada para Enabled: %s",
+                self.strategy_id,
+                self.enabled,
+            )
+
+    def set_mode(self, mode_str: str):
+        new_mode = actions_pb2.TradingMode.Value(mode_str.upper())
+        if self.mode != new_mode:
+            self.mode = new_mode
+            log.warning(
+                "Estratégia '%s' alterada para Mode: %s",
+                self.strategy_id,
+                actions_pb2.TradingMode.Name(self.mode),
+            )

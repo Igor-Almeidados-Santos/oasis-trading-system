@@ -36,13 +36,14 @@ Este guia descreve responsabilidades, dependências e configurações de cada se
 
 ### Strategy Framework (`components/strategy-framework`)
 - **Linguagem**: Python 3.11 com Poetry.
-- **Função**: Implementar estratégias e emitir sinais para o Risk Engine.
+- **Função**: Implementar estratégias, receber comandos operacionais e emitir sinais para o Risk Engine.
 - **Entradas/Saídas**:
-  - Kafka `market-data.trades.normalized`.
+  - Kafka `market-data.trades.coinbase` ou `market-data.trades.normalized` (configurável).
+  - Kafka `control.commands` para controle de bot/estratégias.
   - gRPC `risk_engine.RiskService`.
 - **Dependências**:
   - Poetry para gestão de pacotes.
-  - Variáveis: `KAFKA_BROKERS`, `KAFKA_TOPIC`, `STRATEGY_SYMBOL`, `RISK_ENGINE_GRPC_ADDR`.
+  - Variáveis: `KAFKA_BROKERS`, `MARKET_DATA_TOPIC`, `CONTROL_COMMAND_TOPIC`, `STRATEGY_CONSUMER_GROUP`, `SYMBOL`, `RISK_ENGINE_GRPC_ADDR`.
 - **Operação**:
   ```bash
   cd components/strategy-framework
@@ -51,6 +52,45 @@ Este guia descreve responsabilidades, dependências e configurações de cada se
   ```
 - **Testes**: `poetry run pytest`.
 - **Utilitários**: `poetry run send-sample` para publicar mensagens de teste.
+- **Funcionalidades recentes**:
+  - Estratégias possuem estado (`enabled`, `mode`) ajustável via comandos Kafka.
+  - Consumidor paralelo processa comandos `SET_BOT_STATUS` e `SET_STRATEGY_CONFIG` publicados pelo Control Center.
+
+### Control Center API (`control-center/api-backend`)
+- **Linguagem**: Go 1.21+.
+- **Função**: Consolida posições (Redis), operações (PostgreSQL) e disponibiliza endpoints REST/JSON com autenticação JWT.
+- **Entradas/Saídas**:
+  - Redis (`REDIS_ADDR`) para cache de portfólio.
+  - PostgreSQL (`DATABASE_URL`) para ordens e fills.
+  - Kafka (`control.commands`) como produtor de comandos operacionais.
+- **Dependências**:
+  - Variáveis: `CONTROL_CENTER_API_PORT`, `CONTROL_CENTER_API_USER`, `CONTROL_CENTER_API_PASSWORD`, `JWT_SECRET`, `REDIS_ADDR`, `DATABASE_URL`, `KAFKA_BROKERS`.
+- **Endpoints**:
+  - `POST /api/v1/auth/login`
+  - `GET /api/v1/portfolio`
+  - `GET /api/v1/operations`
+  - `POST /api/v1/bot/status`
+  - `POST /api/v1/strategies/:strategy_id/toggle`
+- **Operação**:
+  ```bash
+  cd control-center/api-backend
+  go run .
+  ```
+  > Se a porta desejada estiver ocupada, o serviço seleciona automaticamente uma porta livre e exibe nos logs.
+
+### Control Center Frontend (`control-center/frontend`)
+- **Linguagem**: TypeScript/React (Next.js 14).
+- **Função**: Dashboard operacional (login, portfólio, operações históricas, bot/estratégias).
+- **Dependências**:
+  - `node` 18+, `npm` ou `pnpm`.
+  - Variáveis: `NEXT_PUBLIC_API_BASE_URL` apontando para o backend.
+- **Operação**:
+  ```bash
+  cd control-center/frontend
+  npm install
+  npm run dev
+  ```
+- **Build**: `npm run build && npm run start`.
 
 ### Risk Engine (`components/risk-engine`)
 - **Linguagem**: Rust.
@@ -95,4 +135,4 @@ Este guia descreve responsabilidades, dependências e configurações de cada se
 ## Convenções de Configuração
 - Arquivo `.env.example` lista variáveis para os serviços.
 - Use `RISK_USE_REDIS=0` para executar sem Redis.
-- Prefira tópicos dedicados (`market-data.trades.normalized`) para consumidores derivados.
+- Prefira tópicos dedicados (`market-data.trades.normalized`, `control.commands`) para consumidores derivados e comandos operacionais.

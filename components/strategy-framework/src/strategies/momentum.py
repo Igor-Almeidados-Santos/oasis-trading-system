@@ -23,6 +23,10 @@ class SimpleMomentum(Strategy):
         """
         Processa uma nova negociação e decide se gera um sinal.
         """
+        # --- VERIFICAÇÃO DE ESTADO (NOVO) ---
+        if not self.enabled:
+            return []
+
         # Ignora trades de símbolos que não estamos a monitorizar
         if header.symbol != self.symbol_to_watch:
             return []
@@ -32,8 +36,8 @@ class SimpleMomentum(Strategy):
 
         if self.last_price > 0 and current_price > self.last_price:
             log.warning(
-                f"SINAL DE COMPRA: Símbolo={header.symbol}, "
-                f"Preço Atual ({current_price}) > Preço Anterior ({self.last_price})"
+                f"SINAL DE COMPRA ({actions_pb2.TradingMode.Name(self.mode)}): "
+                f"Símbolo={header.symbol}, Preço Atual ({current_price}) > Preço Anterior ({self.last_price})"
             )
 
             # Cria o objeto TradingSignal
@@ -42,7 +46,8 @@ class SimpleMomentum(Strategy):
                 symbol=header.symbol,
                 side="BUY",
                 confidence=0.75,
-                signal_timestamp=Timestamp()
+                signal_timestamp=Timestamp(),
+                mode=self.mode,
             )
             signals.append(signal)
 

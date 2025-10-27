@@ -13,6 +13,14 @@ message TradingSignal {
   string side = 3;             // BUY / SELL
   double confidence = 4;       // 0.0 .. 1.0
   google.protobuf.Timestamp signal_timestamp = 5;
+  map<string, string> metadata = 6;
+  TradingMode mode = 7;
+}
+
+// Enum para definir o modo de execução
+enum TradingMode {
+  REAL = 0;  // Execução real
+  PAPER = 1; // Execução simulada
 }
 
 // Pedido de ordem gerado após validação de risco
@@ -24,6 +32,7 @@ message OrderRequest {
   string quantity = 5;
   string price = 6;           // Para LIMIT
   string strategy_id = 7;
+  TradingMode mode = 8;
 }
 
 // Resposta da validação de risco
