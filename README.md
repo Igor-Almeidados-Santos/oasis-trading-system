@@ -1,6 +1,6 @@
-# Oasis Trading System — Guia de Instalação e Configuração
+# Oasis Trading System (OTS)
 
-O Oasis Trading System (OTS) é uma plataforma modular para ingestão de dados de mercado, geração de sinais, validação de risco e execução de ordens em exchanges cripto. Este documento orienta a instalação, configuração e validação do sistema em ambiente local ou de staging.
+Plataforma modular para ingestão de dados de mercado, geração de sinais quantitativos, validação de risco e execução de ordens em corretoras cripto — agora acompanhada por um Control Center web para monitorização e controlo em tempo real.
 
 ```
 Coinbase WS --> Coinbase Connector (Rust) --Kafka--> Data Normalizer (Rust) --Kafka--> Strategy Framework (Python)
@@ -15,347 +15,211 @@ Control Center Web (Next.js) --> Control Center API (Go) --Redis--> Portfolio ca
                                                       -->Kafka control.commands --> Strategy Framework (Python)
 ```
 
+---
+
+## Destaques
+- **Pipeline completo de trading**: do WebSocket de mercado à execução de ordens validadas.
+- **Control Center**: painel Next.js com endpoints protegidos por JWT para visualizar posições, histórico de ordens e governar bots/estratégias.
+- **Arquitetura desacoplada**: comunicação assíncrona via Kafka e contratos Protobuf versionados.
+- **Observabilidade pronta**: métricas Prometheus e integrações com Grafana.
+
+---
+
 ## Sumário
-1. [Pré-requisitos por sistema operacional](#1-pré-requisitos-por-sistema-operacional)
-2. [Clonar o repositório](#2-clonar-o-repositório)
-3. [Configurar variáveis de ambiente](#3-configurar-variáveis-de-ambiente)
-4. [Instalar dependências por componente](#4-instalar-dependências-por-componente)
-5. [Gerar código Protobuf](#5-gerar-código-protobuf)
-6. [Inicializar infraestrutura local](#6-inicializar-infraestrutura-local)
-7. [Executar os serviços](#7-executar-os-serviços)
-8. [Verificações e testes](#8-verificações-e-testes)
-9. [Próximos passos](#9-próximos-passos)
+1. [Stack e Componentes](#stack-e-componentes)
+2. [Pré-requisitos](#pré-requisitos)
+3. [Configuração de Ambiente](#configuração-de-ambiente)
+4. [Quickstart: pipeline + control center](#quickstart-pipeline--control-center)
+5. [Control Center (API e Dashboard)](#control-center-api-e-dashboard)
+6. [Modos de Operação](#modos-de-operação)
+7. [Verificações e Testes](#verificações-e-testes)
+8. [Documentação Complementar](#documentação-complementar)
 
 ---
 
-## 1. Pré-requisitos por sistema operacional
+## Stack e Componentes
 
-### 1.1 Linux (Ubuntu/Debian)
-```bash
-sudo apt-get update
-sudo apt-get install -y git curl build-essential pkg-config cmake protobuf-compiler \
-    librdkafka-dev redis-server python3 python3-venv python3-pip
-curl https://sh.rustup.rs -sSf | sh -s -- -y
-source $HOME/.cargo/env
-curl -LO https://go.dev/dl/go1.21.6.linux-amd64.tar.gz
-sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.21.6.linux-amd64.tar.gz
-echo 'export PATH=$PATH:/usr/local/go/bin' >> ~/.profile
-curl -sSL https://install.python-poetry.org | python3 -
-```
-> Ajuste a versão de Go conforme necessário.
+| Camada             | Tecnologia / Responsabilidade                                                                      |
+|--------------------|----------------------------------------------------------------------------------------------------|
+| Ingestão           | **Coinbase Connector (Rust)** — WebSocket → Kafka (`market-data.trades.coinbase`)                 |
+| Normalização       | **Data Normalizer (Rust)** — saneia e publica `market-data.trades.normalized`                     |
+| Estratégias        | **Strategy Framework (Python)** — consome mercado, recebe comandos (`control.commands`) e gera sinais |
+| Validação de risco | **Risk Engine (Rust)** — políticas de risco e roteamento de ordens                                 |
+| Execução           | **Order Manager (Go)** — gRPC → REST Coinbase                                                      |
+| Control Center API | **Go** — Redis (portfólio), PostgreSQL (operações) e publicação de comandos Kafka                 |
+| Dashboard Web      | **Next.js 14 / TypeScript** — interface operacional (login, monitorização, controlo)             |
+| Observabilidade    | **Prometheus + Grafana**                                                                           |
 
-### 1.2 macOS (Homebrew)
-```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-brew install git docker docker-compose protobuf cmake pkg-config librdkafka redis go python@3.11
-curl https://sh.rustup.rs -sSf | sh -s -- -y
-source $HOME/.cargo/env
-pip3 install --user pipx
-pipx install poetry
-```
-- Inicie o Docker Desktop para habilitar o daemon.
-- Adicione `/opt/homebrew/bin` ao `PATH` se necessário (Apple Silicon).
+---
 
-### 1.3 Windows 10/11
-1. Instale [WSL](https://learn.microsoft.com/windows/wsl/install) (Ubuntu recomendado).
-2. Via PowerShell (administrador):
-   ```powershell
-   winget install -e --id Git.Git
-   winget install -e --id Docker.DockerDesktop
-   winget install -e --id Rustlang.Rustup
-   winget install -e --id GoLang.Go
-   winget install -e --id Python.Python.3.11
-   winget install -e --id Kitware.CMake
-   winget install -e --id ProtobufTools.MicrosoftWindows
-   choco install pkgconfiglite redis-64 lz4 zstd -y
-   ```
-3. Abra o terminal WSL e execute:
+## Pré-requisitos
+- **Ferramentas gerais**: Git, Docker, Docker Compose, `protoc` 3.20+, `cmake`, `pkg-config`, Redis (local ou Docker).
+- **Linguagens/SDKs**: Rust (stable), Python 3.11 + Poetry, Go 1.21+, Node 18+.
+- **Kafka + Zookeeper**: fornecidos pelo `docker-compose.yml`.
+
+> Consulte `docs/development-environment.md` para comandos detalhados de instalação por sistema operativo.
+
+---
+
+## Configuração de Ambiente
+1. Clone e entre no repositório:
    ```bash
-   curl -sSL https://install.python-poetry.org | python3 -
+   git clone git@github.com:seu-org/oasis-trading-system-OTS.git
+   cd oasis-trading-system-OTS
    ```
-4. Configure o PATH do `protoc` e do Go se necessário (`setx PATH "%PATH%;C:\Program Files\Go\bin"`).
 
-### 1.4 Links úteis
-- Git: https://git-scm.com/downloads
-- Docker Engine/Desktop: https://docs.docker.com/get-docker/
-- Protobuf: https://github.com/protocolbuffers/protobuf/releases
-- Rust (rustup): https://www.rust-lang.org/tools/install
-- Go: https://go.dev/dl/
-- Python 3.11: https://www.python.org/downloads/
-- Poetry: https://python-poetry.org/docs/#installation
-- librdkafka: https://github.com/confluentinc/librdkafka#installation
-
----
-
-## 2. Clonar o repositório
-```bash
-git clone git@github.com:seu-org/oasis-trading-system.git
-cd oasis-trading-system
-```
-> Se utilizar HTTPS: `git clone https://github.com/seu-org/oasis-trading-system.git`.
-
----
-
-## 3. Configurar variáveis de ambiente
-1. Copie o template:
+2. Crie seu arquivo `.env`:
    ```bash
    cp .env.example .env
    ```
-   - Windows PowerShell: `Copy-Item .env.example .env`.
-2. Edite `.env` e defina:
-   - Credenciais Coinbase (`COINBASE_API_KEY`, `COINBASE_API_SECRET`, `COINBASE_API_PASSPHRASE`).
-   - Endereços dos serviços (`KAFKA_BROKERS`, `RISK_ENGINE_GRPC_ADDR`, `ORDER_MANAGER_GRPC_ADDR`).
-   - Parâmetros do Coinbase Connector (ver próximos bullet points).
-3. **Nunca** comite o arquivo `.env`. Utilize secret managers em produção.
+   Preencha variáveis importantes:
+   - **Kafka / Dados**: `KAFKA_BROKERS`, `MARKET_DATA_TOPIC`, `CONTROL_COMMAND_TOPIC`.
+   - **Risk/Order**: `RISK_ENGINE_GRPC_ADDR`, `ORDER_MANAGER_GRPC_ADDR`, `ORDER_MANAGER_MODE`.
+   - **Control Center**:
+     - `CONTROL_CENTER_API_PORT`, `CONTROL_CENTER_API_USER`, `CONTROL_CENTER_API_PASSWORD`, `JWT_SECRET`.
+     - `REDIS_ADDR` (portfólio) e `DATABASE_URL` (operações).
+     - `NEXT_PUBLIC_API_BASE_URL` para o frontend apontar ao backend.
+   - **Credenciais Coinbase** (modo real): `COINBASE_API_KEY`, `COINBASE_API_SECRET`, `COINBASE_API_PASSPHRASE`.
 
-Principais variáveis:
-- `KAFKA_BROKERS=localhost:9092`
-- `KAFKA_TOPIC=market-data.trades.normalized`
-- `GROUP_ID=ots-strategy`
-- `CONTROL_COMMAND_TOPIC=control.commands`
-- `COINBASE_WS_URL=wss://ws-feed.exchange.coinbase.com`
-- `COINBASE_KAFKA_TOPIC=market-data.trades.coinbase`
-- `COINBASE_PRODUCT_IDS=BTC-USD,ETH-USD` (lista separada por vírgula)
-- `COINBASE_CHANNELS=matches`
-- `CONNECTOR_MAX_MESSAGES=` (opcional; vazio = fluxo contínuo)
-- `CONNECTOR_BACKOFF_INITIAL_MS=1000` e `CONNECTOR_BACKOFF_MAX_MS=60000`
-- `RISK_USE_REDIS=1` (use `0` para modo stateless)
-- `ORDER_MANAGER_MODE=paper|real` (paper = simulado, não envia ordens reais)
-- `COINBASE_API_BASE_URL=https://api.exchange.coinbase.com` (ajuste conforme API da Coinbase Exchange/Advanced Trade)
-- `ORDER_MANAGER_COINBASE_VARIANT=advanced_trade|exchange` (define esquema de autenticação e paths)
-- `ORDER_MANAGER_COINBASE_ENV=prod|sandbox` (se `COINBASE_API_BASE_URL` não for definido, escolhe um base URL padrão)
-- `ORDER_MANAGER_HTTP_MAX_RETRIES=3` e `ORDER_MANAGER_HTTP_BACKOFF_MS=500` (retries de 429/5xx com backoff exponencial simples)
-
-Variáveis específicas do Control Center:
-- `CONTROL_CENTER_API_PORT=8080`
-- `CONTROL_CENTER_API_USER=admin` e `CONTROL_CENTER_API_PASSWORD=changeme` (defina credenciais reais)
-- `JWT_SECRET=` (obrigatório em produção; fallback `dev-secret` apenas para desenvolvimento)
-- `REDIS_ADDR=redis://localhost:6379/0` (fonte de portfólio)
-- `DATABASE_URL=postgres://user:pass@localhost:5432/oasis` (fonte de operações/fills)
-
-Kafka: em Windows, este projeto já configura listeners no `docker-compose.yml` para expor `localhost:9092`. Caso altere portas, mantenha `KAFKA_ADVERTISED_LISTENERS` consistente e atualize `KAFKA_BROKERS`.
+3. Gere contratos Protobuf sempre que modificar `api/proto/`:
+   ```bash
+   ./scripts/gen-proto.sh     # Linux/macOS
+   ./scripts/gen-proto.ps1    # Windows PowerShell
+   ```
 
 ---
 
-## 4. Instalar dependências por componente
+## Quickstart: pipeline + control center
 
-### 4.1 Serviços Rust
+### 1. Infraestrutura base
 ```bash
-rustup default stable
-cargo check --all
+docker compose up -d zookeeper kafka redis postgres prometheus grafana
 ```
-- Executar nas pastas `components/coinbase-connector`, `components/data-normalizer`, `components/risk-engine`.
+- Postgres: exposto em `localhost:5432` (utilize `DATABASE_URL` compatível).
+- Redis: exposto em `localhost:6379`.
 
-### 4.2 Strategy Framework (Python)
+### 2. Componentes principais
+Abra terminais separados e execute:
+
 ```bash
+# Order Manager (Go)
+cd components/order-manager
+go run .
+```
+
+```bash
+# Risk Engine (Rust)
+cd components/risk-engine
+cargo run
+```
+
+```bash
+# Data Normalizer (Rust)
+cd components/data-normalizer
+cargo run
+```
+
+```bash
+# Strategy Framework (Python)
 cd components/strategy-framework
 poetry install
-poetry run pre-commit install  # opcional, se utilizar hooks
-cd ../..
+poetry run python src/consumer.py
 ```
 
-### 4.3 Order Manager (Go)
 ```bash
-cd components/order-manager
-go mod tidy
-go test ./...
-cd ../..
+# Coinbase Connector (Rust)
+cd components/coinbase-connector
+cargo run
 ```
 
----
+### 3. Control Center
+```bash
+# API Backend (Go)
+cd control-center/api-backend
+go run .
+```
+- Autenticação JWT (`POST /api/v1/auth/login`) com credenciais definidas no `.env`.
+- Integra Redis e PostgreSQL; se a porta estiver ocupada, seleciona automaticamente outra e registra nos logs.
 
-## 5. Gerar código Protobuf
-Execute sempre que alterar arquivos em `api/proto/`.
+```bash
+# Frontend (Next.js)
+cd control-center/frontend
+npm install
+npm run dev
+```
+- Aceda http://localhost:3000.
+- Configure `NEXT_PUBLIC_API_BASE_URL` (por exemplo, `http://localhost:8080`) antes de `npm run dev`.
 
-- Linux/macOS:
-  ```bash
-  ./scripts/gen-proto.sh
-  ```
-- Windows PowerShell:
-  ```powershell
-  ./scripts/gen-proto.ps1
-  ```
-- Alternativa via Poetry:
-  ```bash
-  cd components/strategy-framework
-  poetry run gen-proto
-  cd ../..
-  ```
-
----
-
-## 6. Inicializar infraestrutura local
-1. Suba Kafka e Zookeeper:
-   ```bash
-   docker compose up -d zookeeper kafka
-   ```
-2. (Opcional) Redis standalone:
-   ```bash
-   docker run -d --name redis -p 6379:6379 redis:7
-   ```
-3. Observabilidade:
-   ```bash
-   docker compose up -d prometheus grafana
-   ```
-   - Prometheus: http://localhost:9090
-   - Grafana: http://localhost:3000 (admin/admin). Adicione Prometheus (`http://prometheus:9090`) como data source.
+### Fluxo de dados completo
+1. Coinbase Connector → Kafka (`market-data.trades.coinbase`).
+2. Data Normalizer → Kafka (`market-data.trades.normalized`).
+3. Strategy Framework → Risk Engine → Order Manager.
+4. Redis/PostgreSQL recebem atualizações (positions/operations).
+5. Control Center API expõe portfólio/operacional e publica comandos (`control.commands`).
+6. Dashboard Web autentica, lê dados e envia ações (pausar bot, alternar modo, ativar/desativar estratégias).
 
 ---
 
-## 7. Executar os serviços
-Abra terminais separados e siga a ordem recomendada.
+## Control Center (API e Dashboard)
 
-1. **Order Manager (Go)**
-   ```bash
-   cd components/order-manager
-   go run .
-   ```
-   - Métricas: expostas em `http://localhost:9094/metrics` (configure `ORDER_MANAGER_METRICS_PORT`).
-2. **Risk Engine (Rust)**
-   ```bash
-   cd components/risk-engine
-   cargo run
-   ```
-3. **Data Normalizer (Rust)**
-   ```bash
-   cd components/data-normalizer
-   cargo run
-   ```
-4. **Strategy Framework (Python)**
-   ```bash
-   cd components/strategy-framework
-   poetry run python src/run_framework.py
-   ```
-5. **Coinbase Connector (Rust)**
-   ```bash
-   cd components/coinbase-connector
-   # opcional: export COINBASE_PRODUCT_IDS="BTC-USD,ETH-USD"
-   # opcional: export CONNECTOR_MAX_MESSAGES=100
-  cargo run
-  ```
-6. **Control Center API Backend (Go)**
-   ```bash
-   cd control-center/api-backend
-   go run .
-   ```
-   - Requer Redis, PostgreSQL e Kafka acessíveis. Quando a porta configurada estiver ocupada, o serviço escolhe automaticamente uma porta livre e registra no log.
-7. **Control Center Frontend (Next.js)**
-   ```bash
-   cd control-center/frontend
-   npm install
-   npm run dev
-   ```
-   - Configure `NEXT_PUBLIC_API_BASE_URL` (no `.env.local`) apontando para o backend.
+### Endpoints principais (todos sob `/api/v1`, exceto login)
+| Método | Rota                                   | Descrição                                                       |
+|--------|----------------------------------------|-----------------------------------------------------------------|
+| POST   | `/api/v1/auth/login`                   | Retorna JWT (payload: `{"username","password"}`)                |
+| GET    | `/api/v1/portfolio`                    | Posições agregadas do Redis                                     |
+| GET    | `/api/v1/operations?mode=REAL&limit=50`| Ordens/Fills recentes a partir do PostgreSQL                    |
+| POST   | `/api/v1/bot/status`                   | Envia comando `SET_BOT_STATUS` (payload: `{status: START\|STOP}`) |
+| POST   | `/api/v1/strategies/:id/toggle`        | Envia `SET_STRATEGY_CONFIG` (payload: `{enabled, mode}`)        |
 
-Fluxo ponta a ponta:
-1. Connector publica `market-data.trades.coinbase`.
-2. Normalizer consome e republica `market-data.trades.normalized`.
-3. Strategy Framework gera sinais e chama o Risk Engine.
-4. Risk Engine valida limites (consulta Redis se ativado) e chama o Order Manager.
-5. Order Manager envia ordens para a Coinbase e retorna o resultado.
-6. Control Center API agrega portfólio (Redis), operações (PostgreSQL) e publica comandos no Kafka `control.commands`.
-7. Strategy Framework consome `control.commands` para pausar o bot, ativar/desativar estratégias e alternar o modo (REAL/PAPER).
+> Autentique cada requisição com `Authorization: Bearer <token>`.
 
-### 7.1 Coinbase Connector – visão rápida
-- Ciclo principal com backoff exponencial (configurável via `CONNECTOR_BACKOFF_*`) e reconexão automática ao feed.
-- Classificação de mensagens (`match`, `subscriptions`, `heartbeat`, `status`, `error`) com logs específicos.
-- Ping/Pong respondidos automaticamente; mensagens de erro do feed abortam o ciclo e disparam reconexão.
-- Publicação em Kafka usando `COINBASE_KAFKA_TOPIC`; a key de cada mensagem é o símbolo (`BTC-USD` etc.).
-- Para smoke tests, defina `CONNECTOR_MAX_MESSAGES=5` e verifique a saída antes de desligar.
+### Fluxo sugerido de validação
+1. `POST /auth/login` → receber token.
+2. `GET /portfolio` → validar leitura de posições.
+3. `GET /operations` → confirmar integração com PostgreSQL.
+4. `POST /bot/status` (`STOP`) → Strategy Framework deve parar de processar trades (ver logs).
+5. `POST /bot/status` (`START`) → Strategy Framework retoma consumo.
+6. `POST /strategies/:id/toggle` → ajuste de `enabled`/`mode` reflete nos logs da estratégia.
+
+### Dashboard Web
+- Login com as credenciais do `.env`.
+- Widgets de portfólio e operações consumem os mesmos endpoints.
+- Botões de controlo disparam as rotas acima (feedback visual/fonte de verdade partilhada com o backend).
 
 ---
 
-## 8. Modos de operação: Teste (Paper) e Real
+## Modos de Operação
 
-### 8.1 Negociação de Teste (Paper/Sandbox)
-- Objetivo: validar o pipeline sem enviar ordens reais.
-- Opções de fonte de dados:
-  - Injetar mensagens de teste via Strategy Framework:
-    - `cd components/strategy-framework`
-    - `poetry run send-sample --topic market-data.trades.coinbase --symbol BTC-USD --price 10000 --count 5`
-  - Usar o Coinbase Connector em tempo real, mas apenas para consumir dados:
-    - Garanta que NÃO definiu credenciais da Coinbase no `.env`.
-    - Opcional: `CONNECTOR_MAX_MESSAGES=50` para encerrar após N mensagens.
-- Consumidores:
-  - `poetry run python src/run_framework.py` ou `poetry run python src/consumer.py`.
-  - Estes aguardam Kafka/tópico e fazem retry automático quando indisponíveis.
-- Risk Engine e Order Manager:
-  - Podem ser executados juntos; sem credenciais, o Order Manager rejeita submissões, mantendo a simulação segura.
-- Segurança: não configure `COINBASE_API_*` neste modo.
-
-Checklist rápido (teste):
-- `docker compose up -d zookeeper kafka`
-- `docker exec -it kafka kafka-topics --create --topic market-data.trades.coinbase --bootstrap-server localhost:9092 --replication-factor 1 --partitions 1` (ou confie em autocriação)
-- Rodar conector OU `send-sample` para povoar Kafka.
-- Rodar Strategy Framework e observar sinais e chamadas gRPC ao Risk Engine.
-
-### 8.2 Negociação Real (Produção)
-- Aviso: revise o código, limites de risco e endpoint de API antes de ativar. Teste em ambiente de staging.
-- Credenciais obrigatórias no `.env`:
-  - `COINBASE_API_KEY`, `COINBASE_API_SECRET`, `COINBASE_API_PASSPHRASE`.
-- Endpoints:
-  - WebSocket (mercado): `COINBASE_WS_URL=wss://ws-feed.exchange.coinbase.com`.
-  - REST de ordens: use `ORDER_MANAGER_COINBASE_VARIANT`:
-    - `advanced_trade`: endpoint padrão `https://api.coinbase.com` e path `/api/v3/brokerage/orders`, headers `CB-ACCESS-KEY`, `CB-ACCESS-SIGNATURE`, `CB-ACCESS-TIMESTAMP`.
-    - `exchange` (legacy): endpoint padrão `https://api.exchange.coinbase.com` e path `/orders`, headers `CB-ACCESS-KEY`, `CB-ACCESS-SIGN`, `CB-ACCESS-TIMESTAMP`, `CB-ACCESS-PASSPHRASE`.
-    - Override com `COINBASE_API_BASE_URL` se necessário. Para sandbox, defina `ORDER_MANAGER_COINBASE_ENV=sandbox` (para Exchange usa `https://api-public.sandbox.exchange.coinbase.com`; verifique se há sandbox disponível para Advanced Trade).
-- Limites de risco (no Risk Engine):
-  - Limite por ordem (valor nocional), e limite de exposição por ativo, definidos no código (`components/risk-engine/src/main.rs`). Ajuste antes de operar real.
-  - `RISK_USE_REDIS=1` recomendado para persistir posições; configure `REDIS_ADDR`.
-- Ordem de start:
-  1) Order Manager (Go) – porta padrão `0.0.0.0:50052` (ajuste `ORDER_MANAGER_GRPC_ADDR` se necessário).
-  2) Risk Engine (Rust) – ligará ao Order Manager (use `ORDER_MANAGER_ADDR` ou `ORDER_MANAGER_GRPC_ADDR`).
-  3) Kafka (Zookeeper/Kafka) – `docker compose up -d zookeeper kafka`.
-  4) Coinbase Connector (Rust) – produzirá trades para Kafka.
-  5) Strategy Framework (Python) – consumirá `market-data.trades.normalized` (se usar normalizador) ou `market-data.trades.coinbase` diretamente.
-- Segurança operacional:
-  - Comece com tamanhos mínimos (ex.: `quantity` muito pequena no Risk Engine).
-  - Monitore logs e métricas; mantenha alertas para falhas de rede/Kafka.
-  - Proteja `.env` e use secret managers em produção.
-  - Defina `ORDER_MANAGER_MODE=real` apenas quando estiver pronto para enviar ordens reais.
-  - O Order Manager registra `request_id`, `rate_limit_remaining` e `retry_after` quando disponíveis; ajuste `ORDER_MANAGER_HTTP_MAX_RETRIES`/`BACKOFF_MS` conforme a política de rate limit da Coinbase.
- - Atenção: O segredo de API é tratado como Base64 por padrão; o Order Manager tenta Base64 e Hex automaticamente.
-
-Notas de compatibilidade Coinbase
-- A API “Pro” foi descontinuada; para ambiente real atualize o endpoint e o esquema de autenticação conforme a documentação vigente da Coinbase Exchange/Advanced Trade.
-- Verifique também a disponibilidade de “sandbox” oficial; se ausente, use o modo de teste descrito acima.
+| Modo        | Configuração-chave                                                                                                 | Observações                                                                                   |
+|-------------|---------------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------|
+| **Paper**   | `ORDER_MANAGER_MODE=paper`, não definir credenciais Coinbase. Opcional: gerar market data via `poetry run send-sample`. | Control Center continua operacional; ordens não são enviadas para a exchange.                |
+| **Real**    | Definir `COINBASE_API_*`, `ORDER_MANAGER_MODE=real`, `ORDER_MANAGER_COINBASE_VARIANT` conforme API vigente.         | Rever limites do Risk Engine e ambiente de produção; proteger `.env` com gestor de segredos. |
 
 ---
 
-## 9. Verificações e testes
-- **Kafka**: verifique lag com `kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe --group ots-strategy`.
-- **Conector**:
-  ```bash
-  cd components/coinbase-connector
-  cargo fmt --check
-  cargo clippy -- -D warnings
-  cargo test
-  ```
-  > O binário registra mensagens de reconexão e confirmações de assinatura; use `CONNECTOR_MAX_MESSAGES=10` para testes rápidos.
-- **Risk Engine**: `cd components/risk-engine && cargo fmt && cargo clippy && cargo test`.
-- **Strategy Framework**: `cd components/strategy-framework && poetry run pytest`.
-- **Order Manager**: `cd components/order-manager && go test ./...`.
+## Verificações e Testes
+- **Coinbase Connector**: `cargo fmt --check && cargo clippy -- -D warnings && cargo test`.
+- **Data Normalizer**: `cargo test`.
+- **Strategy Framework**: `poetry run pytest`.
+- **Risk Engine**: `cargo test`.
+- **Order Manager**: `go test ./...`.
 - **Control Center API**:
   ```bash
   cd control-center/api-backend
   go test ./...
-  curl -H "Authorization: Bearer <token>" http://localhost:8080/api/v1/portfolio
+  curl -s -X POST http://localhost:8080/api/v1/auth/login -d '{"username":"admin","password":"changeme"}' \
+       -H 'Content-Type: application/json'
   ```
-  > Use `/api/v1/auth/login` para obter um token JWT antes de consultar endpoints protegidos.
-- **Mensagens de teste**:
-  ```bash
-  cd components/strategy-framework
-  poetry run send-sample --topic market-data.trades.coinbase --count 5
-  ```
-- **Monitore métricas**: cada serviço expõe `/metrics` na porta definida em `.env` (`9091-9094` por padrão).
+- **Kafka**: monitorize lag com `kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe --group strategy-framework-group`.
+- **Métricas**: cada serviço expõe `/metrics` (ports definidas no `.env`), prontas para Prometheus/Grafana.
 
 ---
 
-## 10. Próximos passos
-- Consulte `docs/architecture-overview.md` para entender a topologia completa.
-- Revise `docs/components.md` para detalhes específicos de cada serviço.
-- Planeje deploys com `docs/operations/deployment.md`.
-- Configure observabilidade seguindo `docs/operations/observability.md`.
-- Em caso de incidentes, utilize o runbook `docs/runbooks/incident-response.md`.
+## Documentação Complementar
+- **Arquitetura Detalhada**: `docs/architecture-overview.md`
+- **Guia por Componente**: `docs/components.md`
+- **Ambiente de Desenvolvimento**: `docs/development-environment.md`
+- **Operações / Observabilidade**: `docs/operations/`
+- **Runbooks**: `docs/runbooks/`
 
-Para contribuir ou customizar estratégias, leia `docs/development-environment.md`.
+Sinta-se à vontade para adaptar as estratégias, integrar novas corretoras ou estender o Control Center. Pull requests e sugestões são bem-vindos.
