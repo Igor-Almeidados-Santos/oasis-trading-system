@@ -1,42 +1,179 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { MetricsSection } from "../../../components/dashboard/MetricsSection";
+import { OperationsSection } from "../../../components/dashboard/OperationsSection";
+import { PortfolioSection } from "../../../components/dashboard/PortfolioSection";
+import { SettingsSection } from "../../../components/dashboard/SettingsSection";
+import { SimulationsSection } from "../../../components/dashboard/SimulationsSection";
+import { StrategiesSection } from "../../../components/dashboard/StrategiesSection";
+import type {
+  ControlState,
+  Operation,
+  PortfolioSnapshot,
+  StrategyConfigUpdatePayload,
+  StrategyState,
+} from "../../../lib/types";
+import {
+  fetchControlState,
+  normalizePortfolioSnapshot,
+  setBotStatus,
+  setStrategyConfig,
+} from "../../../lib/api";
 
-interface Position {
-  symbol: string;
-  quantity: string;
-  average_price: string;
-  mode: string;
-}
+type OperationModeFilter = "ALL" | "REAL" | "PAPER";
 
-interface Operation {
-  id: number;
-  symbol: string;
-  side: string;
-  order_type: string;
-  status: string;
-  price: string;
-  quantity: string;
-  executed_at?: string;
-  mode: string;
-}
+type ServiceKey = "control" | "redis" | "database" | "kafka";
+type ServiceStatus = "online" | "offline" | "degraded" | "checking";
+type OperationSortKey = "executed_at" | "price" | "quantity" | "status" | "symbol";
+type DashboardView =
+  | "dashboard"
+  | "strategies"
+  | "portfolio"
+  | "operations"
+  | "metrics"
+  | "simulations"
+  | "settings";
 
-interface StrategyState {
-  strategy_id: string;
-  enabled: boolean;
-  mode: "REAL" | "PAPER";
-}
+type CommandHistoryRecord = {
+  id: string;
+  type: "BOT" | "STRATEGY";
+  action: string;
+  status: "success" | "error";
+  details?: string;
+  payload?: Record<string, unknown>;
+  strategyId?: string;
+  timestamp: string;
+};
 
-interface ControlState {
-  bot_status: string;
-  strategies: StrategyState[];
-}
+type SimulationUpdateResult = {
+  success: boolean;
+  strategy?: StrategyState;
+  errorMessage?: string;
+};
+
+const SERVICE_LABELS: Record<ServiceKey, string> = {
+  control: "Control Center API",
+  redis: "Redis",
+  database: "Base de Dados",
+  kafka: "Kafka",
+};
+
+const SERVICE_ORDER: ServiceKey[] = ["control", "kafka", "redis", "database"];
+
+const SERVICE_DESCRIPTIONS: Record<ServiceKey, string> = {
+  control: "Interface de comandos e estados.",
+  redis: "Armazena posições e configs de estratégia.",
+  database: "Histórico de ordens e operações.",
+  kafka: "Mensageria de bot/estratégias.",
+};
+
+const INITIAL_SERVICE_STATUS: Record<ServiceKey, ServiceStatus> = {
+  control: "checking",
+  redis: "checking",
+  database: "checking",
+  kafka: "checking",
+};
+
+const COMMAND_HISTORY_KEY = "dashboard-command-history";
+
+const deriveStatusFromResponse = (res: Response): ServiceStatus => {
+  if (res.ok) {
+    return "online";
+  }
+  if (res.status >= 500) {
+    return "degraded";
+  }
+  return "offline";
+};
+
+const parseNumeric = (value?: string | null): number | null => {
+  if (value == null) {
+    return null;
+  }
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+};
 
 const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8081";
 
+const ADVANCED_STRATEGY_ID = "advanced-alpha-001";
+
+const parseUsdNumeric = (value?: string | null): number => {
+  if (!value) {
+    return 0;
+  }
+  const sanitized = value.replace(/[^0-9.,-]/g, "");
+  const normalized = sanitized.replace(/,/g, ".");
+  const numeric = Number(normalized);
+  return Number.isFinite(numeric) ? numeric : 0;
+};
+
+const formatUsd = (value: number) =>
+  new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 2,
+  }).format(value);
+
+const defaultAdvancedStrategyState = (): StrategyState => ({
+  strategy_id: ADVANCED_STRATEGY_ID,
+  enabled: true,
+  mode: "PAPER",
+  symbols: ["BTC-USD", "ETH-USD"],
+  usd_balance: "25000",
+  take_profit_bps: 120,
+  stop_loss_bps: 60,
+  fast_window: 5,
+  slow_window: 21,
+  min_signal_bps: 20,
+  position_size_pct: 0.15,
+});
+
+const mergeSimulationUpdate = (
+  base: StrategyState,
+  update: StrategyConfigUpdatePayload
+): StrategyState => {
+  const next: StrategyState = { ...base };
+  if (update.enabled !== undefined) {
+    next.enabled = update.enabled;
+  }
+  if (update.mode !== undefined) {
+    next.mode = update.mode;
+  }
+  if (update.symbols) {
+    next.symbols = [...update.symbols];
+  }
+  if (update.usd_balance !== undefined) {
+    next.usd_balance = update.usd_balance;
+  }
+  if (update.take_profit_bps !== undefined) {
+    next.take_profit_bps = update.take_profit_bps;
+  }
+  if (update.stop_loss_bps !== undefined) {
+    next.stop_loss_bps = update.stop_loss_bps;
+  }
+  if (update.fast_window !== undefined) {
+    next.fast_window = update.fast_window;
+  }
+  if (update.slow_window !== undefined) {
+    next.slow_window = update.slow_window;
+  }
+  if (update.min_signal_bps !== undefined) {
+    next.min_signal_bps = update.min_signal_bps;
+  }
+  if (update.position_size_pct !== undefined) {
+    next.position_size_pct = update.position_size_pct;
+  }
+  return next;
+};
+
 export default function DashboardPage() {
-  const [portfolio, setPortfolio] = useState<Position[]>([]);
+  const [portfolio, setPortfolio] = useState<PortfolioSnapshot>({
+    positions: [],
+    cash: {},
+  });
   const [operations, setOperations] = useState<Operation[]>([]);
   const [controlState, setControlState] = useState<ControlState | null>(null);
   const [portfolioError, setPortfolioError] = useState<string | null>(null);
@@ -50,6 +187,81 @@ export default function DashboardPage() {
     useState<string>("momentum-001");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [darkMode, setDarkMode] = useState(false);
+  const [operationsModeFilter, setOperationsModeFilter] =
+    useState<OperationModeFilter>("ALL");
+  const [operationsLoading, setOperationsLoading] = useState(false);
+  const [initialized, setInitialized] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [operationsView, setOperationsView] =
+    useState<"recent" | "historical">("recent");
+  const [historicalOperations, setHistoricalOperations] = useState<Operation[]>(
+    []
+  );
+  const [historicalLoading, setHistoricalLoading] = useState(false);
+  const [historicalError, setHistoricalError] = useState<string | null>(null);
+  const [historicalLimit, setHistoricalLimit] = useState(50);
+  const [lastCommandAt, setLastCommandAt] = useState<Date | null>(null);
+  const [strategyLastUpdates, setStrategyLastUpdates] = useState<
+    Record<string, string>
+  >({});
+  const [strategyOverrides, setStrategyOverrides] = useState<
+    Record<string, { enabled: boolean; mode: "REAL" | "PAPER" }>
+  >({});
+  const [serviceStatuses, setServiceStatuses] = useState<Record<ServiceKey, ServiceStatus>>(INITIAL_SERVICE_STATUS);
+  const [operationSearch, setOperationSearch] = useState("");
+  const [operationSortKey, setOperationSortKey] = useState<OperationSortKey>("executed_at");
+  const [operationSortDir, setOperationSortDir] = useState<"asc" | "desc">("desc");
+  const [activeView, setActiveView] = useState<DashboardView>("dashboard");
+const [commandHistory, setCommandHistory] = useState<CommandHistoryRecord[]>([]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    try {
+      const stored = localStorage.getItem(COMMAND_HISTORY_KEY);
+      if (!stored) {
+        return;
+      }
+      const parsed = JSON.parse(stored);
+      if (Array.isArray(parsed)) {
+        setCommandHistory(parsed as CommandHistoryRecord[]);
+      }
+    } catch (error) {
+      console.warn("Falha ao ler histórico de comandos:", error);
+    }
+  }, [setCommandHistory]);
+
+  const updateServiceStatuses = useCallback(
+    (updates: Partial<Record<ServiceKey, ServiceStatus>>) => {
+      setServiceStatuses((prev) => ({ ...prev, ...updates }));
+    },
+    []
+  );
+
+  const appendCommandHistory = useCallback(
+    (entry: Omit<CommandHistoryRecord, "id" | "timestamp">) => {
+      setCommandHistory((prev) => {
+        const record: CommandHistoryRecord = {
+          id:
+            typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+              ? crypto.randomUUID()
+              : `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+          timestamp: new Date().toISOString(),
+          ...entry,
+        };
+        const next = [record, ...prev].slice(0, 50);
+        localStorage.setItem(COMMAND_HISTORY_KEY, JSON.stringify(next));
+        return next;
+      });
+    },
+    []
+  );
+
+  const clearCommandHistory = useCallback(() => {
+    setCommandHistory([]);
+    localStorage.removeItem(COMMAND_HISTORY_KEY);
+  }, [setCommandHistory]);
 
   useEffect(() => {
     const storedUser = localStorage.getItem("username");
@@ -61,6 +273,19 @@ export default function DashboardPage() {
     if (storedTheme === "dark") {
       setDarkMode(true);
     }
+
+    const storedView = localStorage.getItem("dashboard-active-view") as DashboardView | null;
+    if (storedView && [
+      "dashboard",
+      "strategies",
+      "portfolio",
+      "operations",
+      "metrics",
+      "simulations",
+      "settings",
+    ].includes(storedView)) {
+      setActiveView(storedView);
+    }
   }, []);
 
   useEffect(() => {
@@ -68,6 +293,14 @@ export default function DashboardPage() {
   }, [darkMode]);
 
   useEffect(() => {
+    localStorage.setItem("dashboard-active-view", activeView);
+  }, [activeView]);
+
+  useEffect(() => {
+    if (initialized) {
+      return;
+    }
+
     const fetchData = async () => {
       const token = localStorage.getItem("accessToken");
       if (!token) {
@@ -75,6 +308,7 @@ export default function DashboardPage() {
         setOperationsError("Sessão expirada. Faça login novamente.");
         setControlError("Sessão expirada. Faça login novamente.");
         setLoading(false);
+        setInitialized(true);
         return;
       }
 
@@ -88,15 +322,36 @@ export default function DashboardPage() {
           Authorization: `Bearer ${token}`,
         };
 
+        const operationsQuery = new URLSearchParams({
+          limit: "8",
+          mode: operationsModeFilter,
+        });
         const [portfolioRes, operationsRes, controlRes] = await Promise.all([
           fetch(`${API_BASE}/api/v1/portfolio`, { headers }),
-          fetch(`${API_BASE}/api/v1/operations?limit=8`, { headers }),
+          fetch(`${API_BASE}/api/v1/operations?${operationsQuery.toString()}`, {
+            headers,
+          }),
           fetch(`${API_BASE}/api/v1/control/state`, { headers }),
         ]);
 
+        const serviceUpdates: Partial<Record<ServiceKey, ServiceStatus>> = {
+          redis: deriveStatusFromResponse(portfolioRes),
+          database: deriveStatusFromResponse(operationsRes),
+          control: deriveStatusFromResponse(controlRes),
+        };
+        serviceUpdates.kafka =
+          serviceUpdates.control === "online"
+            ? "online"
+            : serviceUpdates.control === "degraded"
+            ? "degraded"
+            : serviceUpdates.control;
+        updateServiceStatuses(serviceUpdates);
+
         if (portfolioRes.ok) {
-          setPortfolio(await portfolioRes.json());
+          const payload = await portfolioRes.json();
+          setPortfolio(normalizePortfolioSnapshot(payload));
         } else {
+          setPortfolio({ positions: [], cash: {} });
           setPortfolioError(await safeError(portfolioRes));
         }
 
@@ -108,37 +363,192 @@ export default function DashboardPage() {
 
         if (controlRes.ok) {
           const state: ControlState = await controlRes.json();
-          setControlState(state);
-          if (state.strategies.length > 0) {
-            setSelectedStrategy(state.strategies[0].strategy_id);
+          const strategies = Array.isArray(state.strategies) ? state.strategies : [];
+          const normalizedState: ControlState = { ...state, strategies };
+          setControlState(normalizedState);
+          if (strategies.length > 0) {
+            setStrategyOverrides((prev) => {
+              let changed = false;
+              const next = { ...prev };
+              strategies.forEach((strategy) => {
+                if (next[strategy.strategy_id]) {
+                  changed = true;
+                  delete next[strategy.strategy_id];
+                }
+              });
+              return changed ? next : prev;
+            });
+          }
+          if (strategies.length > 0) {
+            setSelectedStrategy((current) => {
+              if (
+                current &&
+                strategies.some(
+                  (strategy) => strategy.strategy_id === current
+                )
+              ) {
+                return current;
+              }
+              return strategies[0].strategy_id;
+            });
           }
         } else {
           setControlError(await safeError(controlRes));
         }
       } catch {
         setPortfolioError("Falha ao contactar o servidor.");
+        setPortfolio({ positions: [], cash: {} });
         setOperationsError("Falha ao contactar o servidor.");
         setControlError("Falha ao contactar o servidor.");
+        updateServiceStatuses({
+          control: "offline",
+          redis: "offline",
+          database: "offline",
+          kafka: "offline",
+        });
       } finally {
         setLoading(false);
+        setInitialized(true);
       }
     };
 
     fetchData();
-  }, []);
+  }, [initialized, operationsModeFilter, updateServiceStatuses]);
+
+  useEffect(() => {
+    if (!initialized) {
+      return;
+    }
+
+    const token = localStorage.getItem("accessToken");
+    if (!token) {
+      setOperationsError("Sessão expirada. Faça login novamente.");
+      setOperations([]);
+      return;
+    }
+
+    const loadOperations = async () => {
+      try {
+        setOperationsLoading(true);
+        setOperationsError(null);
+        const headers = {
+          Authorization: `Bearer ${token}`,
+        };
+        const params = new URLSearchParams({
+          limit: "8",
+          mode: operationsModeFilter,
+        });
+        const res = await fetch(
+          `${API_BASE}/api/v1/operations?${params.toString()}`,
+          { headers }
+        );
+        if (!res.ok) {
+          const message = await safeError(res);
+          throw new Error(message);
+        }
+        const data: Operation[] = await res.json();
+        setOperations(data);
+      } catch (error) {
+        setOperationsError(
+          error instanceof Error
+            ? error.message
+            : "Falha ao carregar operações."
+        );
+      } finally {
+        setOperationsLoading(false);
+      }
+    };
+
+    void loadOperations();
+  }, [initialized, operationsModeFilter]);
+
+  useEffect(() => {
+    if (!initialized || operationsView !== "historical") {
+      return;
+    }
+
+    const token = localStorage.getItem("accessToken");
+    if (!token) {
+      setHistoricalError("Sessão expirada. Faça login novamente.");
+      setHistoricalOperations([]);
+      return;
+    }
+
+    const loadHistorical = async () => {
+      try {
+        setHistoricalLoading(true);
+        setHistoricalError(null);
+
+        const headers = {
+          Authorization: `Bearer ${token}`,
+        };
+        const params = new URLSearchParams({
+          limit: historicalLimit.toString(),
+          mode: operationsModeFilter,
+        });
+        const res = await fetch(
+          `${API_BASE}/api/v1/operations?${params.toString()}`,
+          { headers }
+        );
+
+        if (!res.ok) {
+          const message = await safeError(res);
+          throw new Error(message);
+        }
+
+        const data: Operation[] = await res.json();
+        setHistoricalOperations(data);
+      } catch (error) {
+        setHistoricalError(
+          error instanceof Error
+            ? error.message
+            : "Falha ao carregar histórico."
+        );
+      } finally {
+        setHistoricalLoading(false);
+      }
+    };
+
+    void loadHistorical();
+  }, [initialized, operationsView, operationsModeFilter, historicalLimit]);
 
   const strategiesList = useMemo(
     () => controlState?.strategies ?? [],
     [controlState]
   );
-  const hasStrategies = strategiesList.length > 0;
+  const displayStrategies = useMemo(() => {
+    const overrides = Object.entries(strategyOverrides)
+      .filter(([strategyId]) =>
+        strategiesList.every((strategy) => strategy.strategy_id !== strategyId)
+      )
+      .map(([strategy_id, value]) => ({
+        strategy_id,
+        enabled: value.enabled,
+        mode: value.mode,
+      } satisfies StrategyState));
+    const merged = [...strategiesList, ...overrides];
+    if (merged.length === 0 && selectedStrategy.trim().length > 0) {
+      merged.push({
+        strategy_id: selectedStrategy.trim(),
+        enabled: true,
+        mode: "PAPER",
+      });
+    }
+    return merged;
+  }, [strategiesList, strategyOverrides, selectedStrategy]);
+  const hasStrategies = displayStrategies.length > 0;
 
   const summary = useMemo(() => {
-    const positions = Array.isArray(portfolio) ? portfolio : [];
+    const positions = Array.isArray(portfolio.positions)
+      ? portfolio.positions
+      : [];
     const ops = Array.isArray(operations) ? operations : [];
     const real = positions.filter((p) => p.mode === "REAL").length;
     const paper = positions.filter((p) => p.mode === "PAPER").length;
     const total = positions.length;
+    const cashPaper = parseUsdNumeric(portfolio.cash?.PAPER);
+    const cashReal = parseUsdNumeric(portfolio.cash?.REAL);
+    const totalCash = cashPaper + cashReal;
     const lastOperation = ops[0]?.executed_at
       ? new Date(ops[0].executed_at).toLocaleString()
       : "—";
@@ -147,6 +557,9 @@ export default function DashboardPage() {
       real,
       paper,
       total,
+      cashPaper,
+      cashReal,
+      totalCash,
       lastOperation,
       botStatus: controlState?.bot_status ?? "—",
       activeStrategies: strategiesList.filter((s) => s.enabled).length,
@@ -154,55 +567,411 @@ export default function DashboardPage() {
     };
   }, [portfolio, operations, controlState, strategiesList]);
 
-  async function sendBotCommand(status: "START" | "STOP") {
-    await sendCommand(async (token) => {
-      const res = await fetch(`${API_BASE}/api/v1/bot/status`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ status }),
+const botStatusNormalized = (controlState?.bot_status ?? "").toUpperCase();
+const isBotRunning = botStatusNormalized === "RUNNING";
+
+const selectedStrategyDetails = useMemo(() => {
+    if (!selectedStrategy) {
+      return null;
+    }
+    const fromList = strategiesList.find(
+      (strategy) => strategy.strategy_id === selectedStrategy
+    );
+    if (fromList) {
+      return fromList;
+    }
+    const override = strategyOverrides[selectedStrategy];
+    if (override) {
+      return {
+        strategy_id: selectedStrategy,
+        enabled: override.enabled,
+        mode: override.mode,
+      } satisfies StrategyState;
+    }
+    return null;
+  }, [strategiesList, strategyOverrides, selectedStrategy]);
+  const selectedStrategyEnabled = selectedStrategyDetails?.enabled ?? false;
+  const selectedStrategyMode = selectedStrategyDetails?.mode ?? "PAPER";
+  const hasSelectedStrategy = selectedStrategy.trim().length > 0;
+
+  const advancedStrategy = useMemo(
+    () => controlState?.strategies.find((item) => item.strategy_id === "advanced-alpha-001"),
+    [controlState]
+  );
+  const simulationsError = controlError ?? (!loading && !advancedStrategy ? "Configuração da estratégia avançada não encontrada." : null);
+
+  const dashboardPortfolioProps = useMemo(
+    () => ({
+      positions: Array.isArray(portfolio.positions)
+        ? portfolio.positions
+        : [],
+      cash: portfolio.cash,
+      loading,
+      error: portfolioError,
+    }),
+    [portfolio, loading, portfolioError]
+  );
+
+  const dashboardStrategiesProps = useMemo(
+    () => ({
+      strategies: displayStrategies,
+      botStatus: summary.botStatus,
+      loading,
+      error: controlError,
+    }),
+    [displayStrategies, summary.botStatus, loading, controlError]
+  );
+
+  const dashboardOperationsProps = useMemo(
+    () => ({
+      operations,
+      loading: operationsLoading,
+      error: operationsError,
+    }),
+    [operations, operationsLoading, operationsError]
+  );
+
+  const processOperations = useCallback(
+    (dataset: Operation[] | null | undefined) => {
+      const safeDataset = Array.isArray(dataset) ? dataset : [];
+      const text = operationSearch.trim().toLowerCase();
+      const filtered = safeDataset.filter((op) => {
+        if (!text) {
+          return true;
+        }
+        const tokens = [
+          op.symbol,
+          op.side,
+          op.status,
+          op.mode,
+          op.order_type,
+          op.client_order_id,
+        ]
+          .filter(Boolean)
+          .map((value) => value!.toLowerCase());
+        return tokens.some((token) => token.includes(text));
       });
 
-      if (!res.ok) {
-        throw new Error(await safeError(res));
+      const sorted = filtered.slice().sort((a, b) => {
+        const direction = operationSortDir === "asc" ? 1 : -1;
+        const compare = (() => {
+          switch (operationSortKey) {
+            case "executed_at": {
+              const aTime = a.executed_at ? Date.parse(a.executed_at) : 0;
+              const bTime = b.executed_at ? Date.parse(b.executed_at) : 0;
+              return aTime - bTime;
+            }
+            case "price": {
+              const aPrice = parseNumeric(a.price) ?? 0;
+              const bPrice = parseNumeric(b.price) ?? 0;
+              return aPrice - bPrice;
+            }
+            case "quantity": {
+              const aQty = parseNumeric(a.quantity) ?? 0;
+              const bQty = parseNumeric(b.quantity) ?? 0;
+              return aQty - bQty;
+            }
+            case "status": {
+              return (a.status || "").localeCompare(b.status || "");
+            }
+            case "symbol":
+            default: {
+              return (a.symbol || "").localeCompare(b.symbol || "");
+            }
+          }
+        })();
+        return compare * direction;
+      });
+
+      return sorted;
+    },
+    [operationSearch, operationSortDir, operationSortKey]
+  );
+
+  const processedRecentOperations = useMemo(
+    () => processOperations(operations),
+    [operations, processOperations]
+  );
+
+  const processedHistoricalOperations = useMemo(
+    () => processOperations(historicalOperations),
+    [historicalOperations, processOperations]
+  );
+
+  const insightsDataset =
+    operationsView === "historical"
+      ? processedHistoricalOperations
+      : processedRecentOperations;
+
+  const operationsInsights = useMemo(() => {
+    const dataset = Array.isArray(insightsDataset) ? insightsDataset : [];
+    const total = dataset.length;
+    const filled = dataset.filter((op) =>
+      ["FILLED", "FILLS", "COMPLETED", "EXECUTED"].includes(
+        (op.status || "").toUpperCase()
+      )
+    ).length;
+    const rejected = dataset.filter((op) =>
+      (op.status || "").toUpperCase().includes("REJECT")
+    ).length;
+    const pending = dataset.filter((op) =>
+      ["PENDING", "NEW", "OPEN"].includes((op.status || "").toUpperCase())
+    ).length;
+    const realOps = dataset.filter((op) => op.mode === "REAL").length;
+    const paperOps = dataset.filter((op) => op.mode === "PAPER").length;
+
+    const fillRate = total > 0 ? Math.round((filled / total) * 100) : 0;
+
+    return {
+      total,
+      filled,
+      rejected,
+      pending,
+      fillRate,
+      realOps,
+      paperOps,
+    };
+  }, [insightsDataset]);
+
+  const sparklineData = useMemo(() => {
+    const slice = insightsDataset.slice(-12);
+    const values = slice
+      .map((op) => parseNumeric(op.price) ?? parseNumeric(op.quantity))
+      .filter((value): value is number => value != null);
+    return values;
+  }, [insightsDataset]);
+
+  const hasRecentBase = Array.isArray(operations) && operations.length > 0;
+  const hasHistoricalBase = Array.isArray(historicalOperations) && historicalOperations.length > 0;
+
+  const sparklineStats = useMemo(() => {
+    if (sparklineData.length === 0) {
+      return { min: null as number | null, max: null as number | null };
+    }
+    return {
+      min: Math.min(...sparklineData),
+      max: Math.max(...sparklineData),
+    };
+  }, [sparklineData]);
+
+  async function sendBotCommand(status: "START" | "STOP") {
+    const result = await sendCommand(
+      async (token) => {
+        await setBotStatus(token, status);
+      },
+      {
+        type: "BOT",
+        action: status,
       }
+    );
+    if (result.success) {
       setCommandStatus(
         status === "START"
           ? "Comando enviado: bot a iniciar."
           : "Comando enviado: bot a parar."
       );
-    });
+    }
   }
 
   async function sendStrategyCommand(
     strategyId: string,
     payload: { enabled: boolean; mode: "REAL" | "PAPER" }
   ) {
-    await sendCommand(async (token) => {
-      const res = await fetch(
-        `${API_BASE}/api/v1/strategies/${strategyId}/toggle`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify(payload),
-        }
-      );
-
-      if (!res.ok) {
-        throw new Error(await safeError(res));
+    if (!strategyId) {
+      setCommandStatus("Informe um identificador de estratégia antes de enviar o comando.");
+      return;
+    }
+    const result = await sendCommand(
+      async (token) => {
+        await setStrategyConfig(token, strategyId, payload);
+      },
+      {
+        type: "STRATEGY",
+        action: payload.mode,
+        strategyId,
+        payload: { enabled: payload.enabled, mode: payload.mode },
       }
+    );
+    if (result.success) {
+      const timestamp = new Date().toISOString();
+      setStrategyLastUpdates((prev) => ({
+        ...prev,
+        [strategyId]: timestamp,
+      }));
+      setStrategyOverrides((prev) => ({
+        ...prev,
+        [strategyId]: {
+          enabled: payload.enabled,
+          mode: payload.mode,
+        },
+      }));
       setCommandStatus(
-        `Estratégia ${strategyId} atualizada para ${payload.mode}.`
+        `Estratégia ${strategyId} ${
+          payload.enabled ? "ativa" : "pausada"
+        } · modo ${payload.mode}.`
       );
+    }
+  }
+
+  async function fetchAdvancedSimulationConfig(): Promise<SimulationUpdateResult> {
+    const token = localStorage.getItem("accessToken");
+    if (!token) {
+      return { success: false, errorMessage: "Sessão expirada. Faça login novamente." };
+    }
+    try {
+      const control = await fetchControlState(token);
+      const found = control.strategies.find((item) => item.strategy_id === ADVANCED_STRATEGY_ID);
+      const nextStrategy = found ?? defaultAdvancedStrategyState();
+      setControlState((prev) => {
+        const fallbackStatus = prev?.bot_status ?? controlState?.bot_status ?? "UNKNOWN";
+        if (!prev) {
+          return {
+            bot_status: fallbackStatus,
+            strategies: [nextStrategy],
+          };
+        }
+        const exists = prev.strategies.some((item) => item.strategy_id === ADVANCED_STRATEGY_ID);
+        const strategies = exists
+          ? prev.strategies.map((item) =>
+              item.strategy_id === ADVANCED_STRATEGY_ID ? { ...item, ...nextStrategy } : item
+            )
+          : [...prev.strategies, nextStrategy];
+        return { ...prev, strategies };
+      });
+      if (nextStrategy.usd_balance !== undefined) {
+        setPortfolio((prev) => ({
+          positions: Array.isArray(prev.positions) ? prev.positions : [],
+          cash: {
+            ...prev.cash,
+            PAPER: nextStrategy.usd_balance,
+          },
+        }));
+      }
+      return { success: true, strategy: nextStrategy };
+    } catch (err) {
+      return {
+        success: false,
+        errorMessage:
+          err instanceof Error ? err.message : "Falha ao sincronizar configurações de simulação.",
+      };
+    }
+  }
+
+  async function handleSimulationsSubmit(
+    update: StrategyConfigUpdatePayload
+  ): Promise<SimulationUpdateResult> {
+    let persistedStrategy: StrategyState | undefined;
+
+    const result = await sendCommand(
+      async (token) => {
+        const commandResponse = await setStrategyConfig(token, ADVANCED_STRATEGY_ID, update);
+        persistedStrategy = commandResponse.config;
+      },
+      {
+        type: "STRATEGY",
+        action: "SIMULATION_CONFIG",
+        strategyId: ADVANCED_STRATEGY_ID,
+        payload: { ...update },
+      }
+    );
+
+    if (result.success) {
+      const baseStrategy = persistedStrategy ?? advancedStrategy ?? defaultAdvancedStrategyState();
+      const merged = persistedStrategy ?? mergeSimulationUpdate(baseStrategy, update);
+
+      setControlState((prev) => {
+        const fallbackStatus = prev?.bot_status ?? controlState?.bot_status ?? "UNKNOWN";
+        if (!prev) {
+          return {
+            bot_status: fallbackStatus,
+            strategies: [merged],
+          };
+        }
+        const exists = prev.strategies.some((strategy) => strategy.strategy_id === ADVANCED_STRATEGY_ID);
+        const strategies = exists
+          ? prev.strategies.map((strategy) =>
+              strategy.strategy_id === ADVANCED_STRATEGY_ID ? { ...strategy, ...merged } : strategy
+            )
+          : [...prev.strategies, merged];
+        return { ...prev, strategies };
+      });
+
+      if (merged.usd_balance !== undefined) {
+        setPortfolio((prev) => ({
+          positions: Array.isArray(prev.positions) ? prev.positions : [],
+          cash: {
+            ...prev.cash,
+            PAPER: merged.usd_balance,
+          },
+        }));
+      }
+
+      setCommandStatus("Configurações de simulação atualizadas.");
+      return { success: true, strategy: merged };
+    }
+
+    return {
+      success: false,
+      errorMessage: result.errorMessage,
+    };
+  }
+
+  async function handleStrategyModeChange(
+    strategyId: string,
+    mode: "REAL" | "PAPER"
+  ) {
+    if (!strategyId) {
+      setCommandStatus("Informe um identificador de estratégia antes de alterar o modo.");
+      return;
+    }
+    const strategy = strategiesList.find(
+      (item) => item.strategy_id === strategyId
+    );
+    const override = strategyOverrides[strategyId];
+    const currentMode = strategy?.mode ?? override?.mode;
+    const currentEnabled = strategy?.enabled ?? override?.enabled ?? true;
+
+    if (currentMode === mode) {
+      setCommandStatus(`Estratégia ${strategyId} já está em modo ${mode}.`);
+      return;
+    }
+    await sendStrategyCommand(strategyId, {
+      enabled: currentEnabled,
+      mode,
     });
   }
 
-  async function sendCommand(fn: (token: string) => Promise<void>) {
+  async function handleStrategyToggle(strategyId: string, enabled: boolean) {
+    if (!strategyId) {
+      setCommandStatus("Informe um identificador de estratégia antes de gerir o estado.");
+      return;
+    }
+    const strategy = strategiesList.find(
+      (item) => item.strategy_id === strategyId
+    );
+    const override = strategyOverrides[strategyId];
+    const currentMode = strategy?.mode ?? override?.mode ?? "PAPER";
+    const currentEnabled = strategy?.enabled ?? override?.enabled;
+    if (currentEnabled === enabled) {
+      setCommandStatus(
+        enabled
+          ? `Estratégia ${strategyId} já se encontra ativa.`
+          : `Estratégia ${strategyId} já está pausada.`
+      );
+      return;
+    }
+    await sendStrategyCommand(strategyId, {
+      enabled,
+      mode: currentMode,
+    });
+  }
+
+  type CommandResult = { success: boolean; errorMessage?: string };
+
+  async function sendCommand(
+    fn: (token: string) => Promise<void>,
+    meta: { type: "BOT" | "STRATEGY"; action: string; strategyId?: string; payload?: Record<string, unknown> }
+  ): Promise<CommandResult> {
     try {
       setCommandLoading(true);
       setCommandStatus(null);
@@ -211,43 +980,151 @@ export default function DashboardPage() {
         throw new Error("Sessão expirada. Faça login novamente.");
       }
       await fn(token);
+      appendCommandHistory({ ...meta, status: "success" });
+      setLastCommandAt(new Date());
       await reloadData(token);
+      return { success: true };
     } catch (err) {
-      setCommandStatus(
-        err instanceof Error ? err.message : "Falha ao enviar comando."
-      );
+      let message = "Falha ao enviar comando.";
+      if (err instanceof Error) {
+        if (
+          err.message === "" ||
+          err.message.includes("Failed to fetch") ||
+          err.message.includes("NetworkError")
+        ) {
+          message =
+            "Não foi possível contactar a Control Center API. Verifique se o serviço backend está em execução.";
+          updateServiceStatuses({
+            control: "offline",
+            kafka: "offline",
+          });
+        } else {
+          message = err.message;
+        }
+      }
+      appendCommandHistory({ ...meta, status: "error", details: message });
+      setCommandStatus(message);
+      return { success: false, errorMessage: message };
     } finally {
       setCommandLoading(false);
     }
   }
 
-  async function reloadData(token: string) {
+  async function reloadData(token: string): Promise<boolean> {
+    let success = true;
     try {
       const headers = { Authorization: `Bearer ${token}` };
+      setPortfolioError(null);
+      setOperationsError(null);
+      setControlError(null);
+
+      const operationsParams = new URLSearchParams({
+        limit: "8",
+        mode: operationsModeFilter,
+      });
+
       const [portfolioRes, operationsRes, controlRes] = await Promise.all([
         fetch(`${API_BASE}/api/v1/portfolio`, { headers }),
-        fetch(`${API_BASE}/api/v1/operations?limit=8`, { headers }),
+        fetch(
+          `${API_BASE}/api/v1/operations?${operationsParams.toString()}`,
+          { headers }
+        ),
         fetch(`${API_BASE}/api/v1/control/state`, { headers }),
       ]);
 
+      const serviceUpdates: Partial<Record<ServiceKey, ServiceStatus>> = {
+        redis: deriveStatusFromResponse(portfolioRes),
+        database: deriveStatusFromResponse(operationsRes),
+        control: deriveStatusFromResponse(controlRes),
+      };
+      serviceUpdates.kafka =
+        serviceUpdates.control === "online"
+          ? "online"
+          : serviceUpdates.control === "degraded"
+          ? "degraded"
+          : serviceUpdates.control;
+      updateServiceStatuses(serviceUpdates);
+
       if (portfolioRes.ok) {
-        setPortfolio(await portfolioRes.json());
+        const payload = await portfolioRes.json();
+        setPortfolio(normalizePortfolioSnapshot(payload));
+      } else {
+        setPortfolio({ positions: [], cash: {} });
+        setPortfolioError(await safeError(portfolioRes));
+        success = false;
       }
       if (operationsRes.ok) {
         setOperations(await operationsRes.json());
+      } else {
+        setOperationsError(await safeError(operationsRes));
+        success = false;
       }
       if (controlRes.ok) {
         const state: ControlState = await controlRes.json();
-        setControlState(state);
-        if (
-          state.strategies.length > 0 &&
-          !state.strategies.some((s) => s.strategy_id === selectedStrategy)
-        ) {
-          setSelectedStrategy(state.strategies[0].strategy_id);
+        const strategies = Array.isArray(state.strategies) ? state.strategies : [];
+        const normalizedState: ControlState = { ...state, strategies };
+        setControlState(normalizedState);
+        if (strategies.length > 0) {
+          setStrategyOverrides((prev) => {
+            let changed = false;
+            const next = { ...prev };
+            strategies.forEach((strategy) => {
+              if (next[strategy.strategy_id]) {
+                changed = true;
+                delete next[strategy.strategy_id];
+              }
+            });
+            return changed ? next : prev;
+          });
         }
+        if (
+          strategies.length > 0 &&
+          !strategies.some((s) => s.strategy_id === selectedStrategy)
+        ) {
+          setSelectedStrategy(strategies[0].strategy_id);
+        }
+      } else {
+        setControlError(await safeError(controlRes));
+        success = false;
       }
+
+      return success;
     } catch (error) {
       console.error("Erro ao recarregar dados:", error);
+      updateServiceStatuses({
+        control: "offline",
+        redis: "offline",
+        database: "offline",
+        kafka: "offline",
+      });
+      throw error instanceof Error
+        ? error
+        : new Error("Erro ao recarregar dados.");
+    }
+    return success;
+  }
+
+  async function handleRefresh() {
+    const token = localStorage.getItem("accessToken");
+    if (!token) {
+      setCommandStatus("Sessão expirada. Faça login novamente.");
+      return;
+    }
+
+    try {
+      setIsRefreshing(true);
+      const success = await reloadData(token);
+      if (!success) {
+        setCommandStatus("Atualização concluída com avisos.");
+      }
+    } catch (error) {
+      setCommandStatus(
+        error instanceof Error
+          ? error.message
+          : "Falha ao atualizar dados."
+      );
+    } finally {
+      setIsRefreshing(false);
     }
   }
 
@@ -291,31 +1168,50 @@ export default function DashboardPage() {
                   icon={<GridIcon className="h-5 w-5" />}
                   label="Dashboard"
                   collapsed={sidebarCollapsed}
+                  active={activeView === "dashboard"}
+                  onSelect={() => setActiveView("dashboard")}
                 />
                 <NavItem
                   icon={<BrainIcon className="h-5 w-5" />}
                   label="Estratégias"
                   collapsed={sidebarCollapsed}
+                  active={activeView === "strategies"}
+                  onSelect={() => setActiveView("strategies")}
                 />
                 <NavItem
                   icon={<ChartUpIcon className="h-5 w-5" />}
                   label="Portfólio"
                   collapsed={sidebarCollapsed}
+                  active={activeView === "portfolio"}
+                  onSelect={() => setActiveView("portfolio")}
                 />
                 <NavItem
                   icon={<ClipboardIcon className="h-5 w-5" />}
                   label="Operações"
                   collapsed={sidebarCollapsed}
+                  active={activeView === "operations"}
+                  onSelect={() => setActiveView("operations")}
+                />
+                <NavItem
+                  icon={<BeakerIcon className="h-5 w-5" />}
+                  label="Simulações"
+                  collapsed={sidebarCollapsed}
+                  active={activeView === "simulations"}
+                  onSelect={() => setActiveView("simulations")}
                 />
                 <NavItem
                   icon={<RadarIcon className="h-5 w-5" />}
                   label="Métricas"
                   collapsed={sidebarCollapsed}
+                  active={activeView === "metrics"}
+                  onSelect={() => setActiveView("metrics")}
                 />
                 <NavItem
                   icon={<CogIcon className="h-5 w-5" />}
                   label="Configurações"
                   collapsed={sidebarCollapsed}
+                  active={activeView === "settings"}
+                  onSelect={() => setActiveView("settings")}
                 />
               </nav>
             </div>
@@ -335,6 +1231,8 @@ export default function DashboardPage() {
           </aside>
 
           <main className="flex-1 space-y-5 bg-white px-6 py-8 shadow transition-colors dark:bg-slate-800">
+            {activeView === "dashboard" ? (
+              <>
             <header className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
               <div>
                 <p className="text-sm text-slate-500 dark:text-slate-300">
@@ -369,12 +1267,18 @@ export default function DashboardPage() {
               </div>
             </header>
 
-            <section className="grid gap-4 border border-slate-200 bg-white p-6 shadow-sm dark:border-slate-700 dark:bg-slate-800 md:grid-cols-3">
+            <section className="grid gap-4 border border-slate-200 bg-white p-6 shadow-sm dark:border-slate-700 dark:bg-slate-800 sm:grid-cols-2 lg:grid-cols-4">
               <SummaryCard
                 title="Posições ativas"
                 value={summary.total.toString()}
                 description={`${summary.real} REAL · ${summary.paper} PAPER`}
                 accent="from-emerald-400 to-emerald-500"
+              />
+              <SummaryCard
+                title="Caixa disponível"
+                value={formatUsd(summary.totalCash)}
+                description={`Paper ${formatUsd(summary.cashPaper)} · Real ${formatUsd(summary.cashReal)}`}
+                accent="from-sky-400 to-sky-500"
               />
               <SummaryCard
                 title="Estado do Bot"
@@ -388,6 +1292,103 @@ export default function DashboardPage() {
                 description="Geridas via Control Center"
                 accent="from-amber-400 to-amber-500"
               />
+            </section>
+
+            <section className="grid gap-4 border border-slate-200 bg-white p-6 shadow-sm dark:border-slate-700 dark:bg-slate-800 md:grid-cols-4">
+              {SERVICE_ORDER.map((serviceKey) => (
+                <ServiceStatusCard
+                  key={serviceKey}
+                  label={SERVICE_LABELS[serviceKey]}
+                  description={SERVICE_DESCRIPTIONS[serviceKey]}
+                  status={serviceStatuses[serviceKey] ?? "checking"}
+                />
+              ))}
+            </section>
+
+            <section className="grid gap-4 border border-slate-200 bg-slate-50 p-6 shadow-sm dark:border-slate-700 dark:bg-slate-900/40 md:grid-cols-2">
+              <div>
+                <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">
+                  Indicadores de operações
+                </h2>
+                <p className="text-sm text-slate-500 dark:text-slate-400">
+                  Baseado em {operationsInsights.total} registos
+                  {operationsView === "historical" ? " (histórico)" : " (recentes)"}.
+                </p>
+                <div className="mt-4 space-y-3">
+                  <InsightBar
+                    label="Taxa de fill"
+                    value={`${operationsInsights.fillRate}%`}
+                    progress={operationsInsights.fillRate}
+                    tone="emerald"
+                  />
+                  <InsightStat
+                    label="Pendentes"
+                    value={operationsInsights.pending.toString()}
+                    tone="amber"
+                  />
+                  <InsightStat
+                    label="Rejeitadas"
+                    value={operationsInsights.rejected.toString()}
+                    tone="rose"
+                  />
+                </div>
+              </div>
+              <div className="space-y-4">
+                <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-700 dark:bg-slate-800">
+                  <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                    Distribuição por modo
+                  </h3>
+                  <div className="mt-4 space-y-2">
+                    <InsightDistribution
+                      label="Paper"
+                      count={operationsInsights.paperOps}
+                      total={operationsInsights.total}
+                      tone="amber"
+                    />
+                    <InsightDistribution
+                      label="Real"
+                      count={operationsInsights.realOps}
+                      total={operationsInsights.total}
+                      tone="emerald"
+                    />
+                    <InsightDistribution
+                      label="Outros"
+                      count={Math.max(
+                        0,
+                        operationsInsights.total -
+                          operationsInsights.paperOps -
+                          operationsInsights.realOps
+                      )}
+                      total={operationsInsights.total}
+                      tone="indigo"
+                    />
+                  </div>
+                </div>
+                <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-700 dark:bg-slate-800">
+                  <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                    Tendência (ult. {Math.min(sparklineData.length, 12)} pontos)
+                  </h3>
+                  {sparklineData.length > 1 ? (
+                    <>
+                      <Sparkline data={sparklineData} />
+                      {sparklineStats.min != null && sparklineStats.max != null && (
+                        <div className="mt-3 flex justify-between text-[11px] text-slate-500 dark:text-slate-400">
+                          <span>
+                            Mín {sparklineStats.min.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                          </span>
+                          <span>
+                            Máx {sparklineStats.max.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                          </span>
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <p className="mt-4 text-xs text-slate-500 dark:text-slate-400">
+                      Aguarde mais operações para visualizar a tendência.
+                    </p>
+                  )}
+                </div>
+              </div>
             </section>
 
             <section className="grid gap-6 lg:grid-cols-2">
@@ -415,14 +1416,14 @@ export default function DashboardPage() {
                   <ErrorState message={portfolioError} />
                 ) : controlError ? (
                   <ErrorState message={controlError} />
-                ) : portfolio.length === 0 ? (
+                ) : portfolio.positions.length === 0 ? (
                   <EmptyState
                     message="Nenhuma posição registada no momento."
                     darkMode={darkMode}
                   />
                 ) : (
                   <div className="mt-6 space-y-4">
-                    {portfolio.map((pos) => (
+                    {portfolio.positions.map((pos) => (
                       <div
                         key={`${pos.mode}-${pos.symbol}`}
                         className="flex items-center justify-between border border-slate-200 bg-white px-4 py-3 shadow-sm transition dark:border-slate-700 dark:bg-slate-800/60"
@@ -455,7 +1456,7 @@ export default function DashboardPage() {
               </div>
 
               <div className="bg-slate-50 p-6 dark:bg-slate-900/40">
-                <div className="flex items-center justify-between">
+                <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                   <div>
                     <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">
                       Operações Recentes
@@ -464,29 +1465,144 @@ export default function DashboardPage() {
                       Últimas ordens aprovadas pelo Risk Engine.
                     </p>
                   </div>
-                  <button
-                    type="button"
-                    className="text-sm font-medium text-indigo-600 transition hover:text-indigo-500 dark:text-indigo-300 dark:hover:text-indigo-200"
-                  >
-                    Ver histórico
-                  </button>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <ModeFilterPill
+                      label="Recentes"
+                      active={operationsView === "recent"}
+                      onClick={() => setOperationsView("recent")}
+                      disabled={operationsLoading || historicalLoading}
+                    />
+                    <ModeFilterPill
+                      label="Histórico"
+                      active={operationsView === "historical"}
+                      onClick={() => setOperationsView("historical")}
+                      disabled={operationsLoading || historicalLoading}
+                    />
+                    <ModeFilterPill
+                      label="Todos"
+                      active={operationsModeFilter === "ALL"}
+                      onClick={() => setOperationsModeFilter("ALL")}
+                      disabled={operationsLoading || historicalLoading}
+                    />
+                    <ModeFilterPill
+                      label="Real"
+                      active={operationsModeFilter === "REAL"}
+                      onClick={() => setOperationsModeFilter("REAL")}
+                      disabled={operationsLoading || historicalLoading}
+                    />
+                    <ModeFilterPill
+                      label="Paper"
+                      active={operationsModeFilter === "PAPER"}
+                      onClick={() => setOperationsModeFilter("PAPER")}
+                      disabled={operationsLoading || historicalLoading}
+                    />
+                    <div className="relative">
+                      <input
+                        type="search"
+                        value={operationSearch}
+                        onChange={(event) => setOperationSearch(event.target.value)}
+                        placeholder="Filtrar operações..."
+                        className="w-48 rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-semibold text-slate-600 shadow-sm transition focus:border-indigo-300 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-200"
+                      />
+                    </div>
+                    <label className="flex items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-semibold text-slate-600 shadow-sm dark:border-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                      Ordenar
+                      <select
+                        value={operationSortKey}
+                        onChange={(event) =>
+                          setOperationSortKey(event.target.value as OperationSortKey)
+                        }
+                        className="rounded-full border-none bg-transparent text-xs font-semibold focus:outline-none dark:bg-transparent"
+                      >
+                        <option value="executed_at">Data</option>
+                        <option value="price">Preço</option>
+                        <option value="quantity">Quantidade</option>
+                        <option value="status">Status</option>
+                        <option value="symbol">Símbolo</option>
+                      </select>
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setOperationSortDir((prev) => (prev === "asc" ? "desc" : "asc"))
+                      }
+                      className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-600 transition hover:border-indigo-300 hover:text-indigo-600 dark:border-slate-600 dark:text-slate-300 dark:hover:text-indigo-200"
+                    >
+                      {operationSortDir === "asc" ? "Ascendente" : "Descendente"}
+                    </button>
+                    {operationsView === "historical" && (
+                      <label className="flex items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-semibold text-slate-600 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                        Limite
+                        <select
+                          value={historicalLimit}
+                          onChange={(event) =>
+                            setHistoricalLimit(Number(event.target.value))
+                          }
+                          className="rounded-full border-none bg-transparent text-xs font-semibold focus:outline-none dark:bg-transparent"
+                          disabled={historicalLoading}
+                        >
+                          {[20, 50, 100, 200].map((option) => (
+                            <option key={option} value={option}>
+                              {option}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    )}
+                    <button
+                      type="button"
+                      onClick={handleRefresh}
+                      disabled={isRefreshing}
+                      className={`rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-600 transition hover:border-indigo-300 hover:text-indigo-600 dark:border-slate-600 dark:text-slate-300 dark:hover:text-indigo-200 ${
+                        isRefreshing ? "cursor-not-allowed opacity-60" : ""
+                      }`}
+                    >
+                      {isRefreshing ? "Atualizando..." : "Recarregar"}
+                    </button>
+                  </div>
                 </div>
 
-                {loading ? (
+                {operationsView === "historical" ? (
+                  historicalLoading ? (
+                    <EmptyState
+                      message="A carregar histórico..."
+                      darkMode={darkMode}
+                    />
+                  ) : historicalError ? (
+                    <ErrorState message={historicalError} />
+                  ) : processedHistoricalOperations.length === 0 ? (
+                    <EmptyState
+                      message={
+                        hasHistoricalBase
+                          ? "Nenhuma operação corresponde à pesquisa."
+                          : "Sem registos no intervalo selecionado."
+                      }
+                      darkMode={darkMode}
+                    />
+                  ) : (
+                    <HistoricalOperationsTable
+                      operations={processedHistoricalOperations}
+                    />
+                  )
+                ) : loading || operationsLoading ? (
                   <EmptyState
                     message="A carregar operações..."
                     darkMode={darkMode}
                   />
                 ) : operationsError ? (
                   <ErrorState message={operationsError} />
-                ) : operations.length === 0 ? (
+                ) : processedRecentOperations.length === 0 ? (
                   <EmptyState
-                    message="Ainda não foram registadas operações."
+                    message={
+                      hasRecentBase
+                        ? "Nenhuma operação corresponde à pesquisa."
+                        : "Ainda não foram registadas operações."
+                    }
                     darkMode={darkMode}
                   />
                 ) : (
                   <ul className="mt-6 space-y-4">
-                    {operations.slice(0, 5).map((op) => (
+                    {processedRecentOperations.slice(0, 5).map((op) => (
                       <li
                         key={op.id}
                         className="flex items-center justify-between border border-slate-200 bg-white px-4 py-3 shadow-sm transition dark:border-slate-700 dark:bg-slate-800/60"
@@ -539,7 +1655,7 @@ export default function DashboardPage() {
                         }
                         className="rounded-full border-none bg-transparent text-xs font-semibold text-slate-700 focus:outline-none dark:text-slate-200"
                       >
-                        {strategiesList.map((strategy) => (
+                        {displayStrategies.map((strategy) => (
                           <option
                             key={strategy.strategy_id}
                             value={strategy.strategy_id}
@@ -550,43 +1666,68 @@ export default function DashboardPage() {
                       </select>
                     </label>
                   ) : (
-                    <span className="rounded-full bg-white px-3 py-2 text-xs font-semibold text-slate-500 shadow-sm dark:bg-slate-800 dark:text-slate-400">
-                      Sem estratégias registadas
-                    </span>
+                    <label className="flex items-center gap-2 rounded-full border border-dashed border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-500 shadow-sm dark:border-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                      Estratégia
+                      <input
+                        value={selectedStrategy}
+                        onChange={(event) =>
+                          setSelectedStrategy(event.target.value.trim())
+                        }
+                        placeholder="momentum-001"
+                        className="w-32 rounded-full border-none bg-transparent text-xs font-semibold text-slate-700 focus:outline-none dark:text-slate-200"
+                      />
+                    </label>
                   )}
                   <ActionButton
                     label="Ativar Bot"
                     tone="emerald"
                     onClick={() => sendBotCommand("START")}
-                    disabled={commandLoading}
+                    disabled={commandLoading || isBotRunning}
                   />
                   <ActionButton
                     label="Pausar Bot"
                     tone="rose"
                     onClick={() => sendBotCommand("STOP")}
-                    disabled={commandLoading}
+                    disabled={commandLoading || !isBotRunning}
                   />
                   <ActionButton
                     label="Modo Paper"
                     tone="amber"
                     onClick={() =>
-                      sendStrategyCommand(selectedStrategy, {
-                        enabled: true,
-                        mode: "PAPER",
-                      })
+                      void handleStrategyModeChange(selectedStrategy, "PAPER")
                     }
-                    disabled={commandLoading || !hasStrategies}
+                    disabled={
+                      commandLoading ||
+                      !hasSelectedStrategy ||
+                      selectedStrategyMode === "PAPER"
+                    }
                   />
                   <ActionButton
                     label="Modo Real"
                     tone="indigo"
                     onClick={() =>
-                      sendStrategyCommand(selectedStrategy, {
-                        enabled: true,
-                        mode: "REAL",
-                      })
+                      void handleStrategyModeChange(selectedStrategy, "REAL")
                     }
-                    disabled={commandLoading || !hasStrategies}
+                    disabled={
+                      commandLoading ||
+                      !hasSelectedStrategy ||
+                      selectedStrategyMode === "REAL"
+                    }
+                  />
+                  <ActionButton
+                    label={
+                      selectedStrategyEnabled
+                        ? "Pausar estratégia"
+                        : "Ativar estratégia"
+                    }
+                    tone={selectedStrategyEnabled ? "rose" : "emerald"}
+                    onClick={() =>
+                      void handleStrategyToggle(
+                        selectedStrategy,
+                        !selectedStrategyEnabled
+                      )
+                    }
+                    disabled={commandLoading || !hasSelectedStrategy}
                   />
                 </div>
               </div>
@@ -596,11 +1737,46 @@ export default function DashboardPage() {
                   {commandStatus}
                 </div>
               )}
+              {lastCommandAt && (
+                <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">
+                  Último comando enviado em {lastCommandAt.toLocaleString()}
+                </p>
+              )}
+              {!hasStrategies && !commandStatus && (
+                <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">
+                  Dica: introduza um identificador de estratégia (ex.: momentum-001)
+                  para enviar comandos mesmo antes da sincronização com o Redis.
+                </p>
+              )}
               {controlError && (
                 <div className="mt-4 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 dark:border-rose-500/40 dark:bg-rose-500/10 dark:text-rose-200">
                   {controlError}
                 </div>
               )}
+
+              <div className="mt-6">
+                <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                  Estratégias monitorizadas
+                </h3>
+                <div className="mt-3 space-y-3">
+                  {hasStrategies ? (
+                    displayStrategies.map((strategy) => (
+                      <StrategyRow
+                        key={strategy.strategy_id}
+                        strategy={strategy}
+                        disabled={commandLoading}
+                        onModeChange={handleStrategyModeChange}
+                        onToggleEnabled={handleStrategyToggle}
+                        lastUpdatedAt={strategyLastUpdates[strategy.strategy_id] ?? null}
+                      />
+                    ))
+                  ) : (
+                    <div className="rounded-xl border border-slate-200 bg-white px-4 py-6 text-sm text-slate-500 shadow-sm dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">
+                      Ainda não há estratégias configuradas.
+                    </div>
+                  )}
+                </div>
+              </div>
 
               <div className="mt-6 grid gap-4 border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-800 md:grid-cols-4">
                 <ControlCard
@@ -617,7 +1793,7 @@ export default function DashboardPage() {
                 />
                 <ControlCard
                   title="Alertas"
-                  value={operations.length.toString()}
+                  value={(Array.isArray(operations) ? operations.length : 0).toString()}
                   description="Operações processadas nas últimas leituras."
                   accent="bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
                 />
@@ -628,7 +1804,112 @@ export default function DashboardPage() {
                   accent="bg-slate-200 text-slate-700 dark:bg-slate-700/60 dark:text-slate-200"
                 />
               </div>
+
+              <div className="mt-6 rounded-xl border border-slate-200 bg-white p-6 shadow-sm dark:border-slate-700 dark:bg-slate-800">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                    Histórico de comandos
+                  </h3>
+                  {commandHistory.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={clearCommandHistory}
+                      className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-600 transition hover:border-rose-300 hover:text-rose-600 dark:border-slate-600 dark:text-slate-300 dark:hover:border-rose-500 dark:hover:text-rose-300"
+                    >
+                      Limpar histórico
+                    </button>
+                  )}
+                </div>
+                {commandHistory.length === 0 ? (
+                  <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">
+                    Nenhum comando enviado nesta sessão.
+                  </p>
+                ) : (
+                  <div className="mt-4 overflow-x-auto">
+                    <table className="min-w-full divide-y divide-slate-200 text-left text-xs dark:divide-slate-700">
+                      <thead className="bg-slate-100 uppercase tracking-wide text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+                        <tr>
+                          <th className="px-4 py-3">Data</th>
+                          <th className="px-4 py-3">Tipo</th>
+                          <th className="px-4 py-3">Ação</th>
+                          <th className="px-4 py-3">Estado</th>
+                          <th className="px-4 py-3">Detalhes</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-200 text-slate-600 dark:divide-slate-700 dark:text-slate-300">
+                        {commandHistory.map((entry) => (
+                          <tr key={entry.id}>
+                            <td className="px-4 py-3 font-mono text-[11px] text-slate-500 dark:text-slate-400">
+                              {new Date(entry.timestamp).toLocaleString()}
+                            </td>
+                            <td className="px-4 py-3">{entry.type}</td>
+                            <td className="px-4 py-3">
+                              {entry.action}
+                              {entry.strategyId ? ` · ${entry.strategyId}` : ""}
+                            </td>
+                            <td className="px-4 py-3">
+                              <span
+                                className={`rounded-full px-2 py-1 text-[11px] font-semibold ${
+                                  entry.status === "success"
+                                    ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-200"
+                                    : "bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-200"
+                                }`}
+                              >
+                                {entry.status === "success" ? "Sucesso" : "Erro"}
+                              </span>
+                            </td>
+                            <td className="px-4 py-3 max-w-xs truncate" title={entry.details ?? ""}>
+                              {entry.details || "—"}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
             </section>
+              </>
+            ) : (
+              <div className="space-y-6">
+                {activeView === "strategies" && (
+                  <StrategiesSection
+                    {...dashboardStrategiesProps}
+                    standalone={false}
+                    showBackLink={false}
+                  />
+                )}
+                {activeView === "portfolio" && (
+                  <PortfolioSection
+                    {...dashboardPortfolioProps}
+                    standalone={false}
+                    showBackLink={false}
+                  />
+                )}
+                {activeView === "operations" && (
+                  <OperationsSection
+                    {...dashboardOperationsProps}
+                    standalone={false}
+                    showBackLink={false}
+                  />
+                )}
+                {activeView === "simulations" && (
+                  <SimulationsSection
+                    strategy={advancedStrategy}
+                    loading={loading}
+                    error={simulationsError}
+                    onSubmit={handleSimulationsSubmit}
+                    onRefresh={fetchAdvancedSimulationConfig}
+                  />
+                )}
+                {activeView === "metrics" && (
+                  <MetricsSection standalone={false} showBackLink={false} />
+                )}
+                {activeView === "settings" && (
+                  <SettingsSection standalone={false} showBackLink={false} />
+                )}
+              </div>
+            )}
           </main>
         </div>
       </div>
@@ -640,20 +1921,26 @@ function NavItem({
   label,
   icon,
   collapsed,
+  active,
+  onSelect,
 }: {
   label: string;
   icon: React.ReactNode;
   collapsed: boolean;
+  active: boolean;
+  onSelect: () => void;
 }) {
   return (
-    <div
-      className={`flex items-center gap-3 px-4 py-3 text-sm transition hover:bg-white/10 ${
-        collapsed ? "justify-center" : ""
-      }`}
+    <button
+      type="button"
+      onClick={onSelect}
+      className={`flex items-center gap-3 px-4 py-3 text-sm transition ${
+        active ? "bg-white/15 text-white" : "text-white/80 hover:bg-white/10"
+      } ${collapsed ? "justify-center" : ""}`}
     >
-      <span className="text-white">{icon}</span>
+      <span className="text-current">{icon}</span>
       {!collapsed && <span>{label}</span>}
-    </div>
+    </button>
   );
 }
 
@@ -709,6 +1996,364 @@ function ErrorState({ message }: { message: string }) {
   return (
     <div className="mt-6 border border-rose-200 bg-rose-50 px-4 py-4 text-sm text-rose-700 dark:border-rose-500/40 dark:bg-rose-500/10 dark:text-rose-200">
       {message}
+    </div>
+  );
+}
+
+function ServiceStatusCard({
+  label,
+  status,
+  description,
+}: {
+  label: string;
+  status: ServiceStatus;
+  description: string;
+}) {
+  const statusConfig: Record<
+    ServiceStatus,
+    { label: string; dotClass: string; textClass: string }
+  > = {
+    online: {
+      label: "Online",
+      dotClass: "bg-emerald-400",
+      textClass: "text-emerald-600 dark:text-emerald-300",
+    },
+    degraded: {
+      label: "Degradado",
+      dotClass: "bg-amber-400",
+      textClass: "text-amber-600 dark:text-amber-300",
+    },
+    offline: {
+      label: "Offline",
+      dotClass: "bg-rose-500",
+      textClass: "text-rose-600 dark:text-rose-300",
+    },
+    checking: {
+      label: "A verificar",
+      dotClass: "bg-slate-400",
+      textClass: "text-slate-500 dark:text-slate-300",
+    },
+  };
+
+  const config = statusConfig[status] ?? statusConfig.checking;
+
+  return (
+    <div className="flex flex-col gap-2 rounded-xl border border-slate-200 bg-white p-4 shadow-sm transition-colors dark:border-slate-700 dark:bg-slate-800">
+      <div className="flex items-center justify-between">
+        <p className="text-sm font-semibold text-slate-800 dark:text-slate-100">
+          {label}
+        </p>
+        <span className={`flex items-center gap-2 text-xs font-semibold ${config.textClass}`}>
+          <span className={`h-2.5 w-2.5 rounded-full ${config.dotClass}`} />
+          {config.label}
+        </span>
+      </div>
+      <p className="text-xs text-slate-500 dark:text-slate-400">{description}</p>
+    </div>
+  );
+}
+
+function Sparkline({ data }: { data: number[] }) {
+  if (data.length === 0) {
+    return null;
+  }
+
+  const width = 100;
+  const height = 30;
+  const min = Math.min(...data);
+  const max = Math.max(...data);
+  const range = max - min || 1;
+  const effectiveData = data.length > 1 ? data : [...data, data[0]];
+
+  const points = effectiveData
+    .map((value, index) => {
+      const x = (index / (effectiveData.length - 1 || 1)) * width;
+      const normalized = range === 0 ? 0.5 : (value - min) / range;
+      const y = height - 2 - normalized * (height - 4);
+      return `${x},${y}`;
+    })
+    .join(" ");
+
+  return (
+    <svg
+      viewBox={`0 0 ${width} ${height}`}
+      className="mt-4 h-16 w-full text-indigo-500"
+      role="img"
+      aria-label="Sparkline de operações"
+    >
+      <polyline
+        fill="none"
+        stroke="currentColor"
+        strokeWidth={2}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        points={points}
+      />
+    </svg>
+  );
+}
+
+function InsightBar({
+  label,
+  value,
+  progress,
+  tone,
+}: {
+  label: string;
+  value: string;
+  progress: number;
+  tone: "emerald" | "indigo" | "amber" | "rose";
+}) {
+  const toneClasses = {
+    emerald: "bg-emerald-500",
+    indigo: "bg-indigo-500",
+    amber: "bg-amber-500",
+    rose: "bg-rose-500",
+  } as const;
+
+  const clamped = Math.min(100, Math.max(0, progress));
+
+  return (
+    <div>
+      <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
+        <span>{label}</span>
+        <span className="font-semibold text-slate-700 dark:text-slate-200">
+          {value}
+        </span>
+      </div>
+      <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
+        <div
+          className={`${toneClasses[tone]} h-full transition-all`}
+          style={{ width: `${clamped}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+function InsightStat({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: string;
+  tone: "emerald" | "indigo" | "amber" | "rose";
+}) {
+  const toneClasses = {
+    emerald: "text-emerald-600 dark:text-emerald-300",
+    indigo: "text-indigo-600 dark:text-indigo-300",
+    amber: "text-amber-600 dark:text-amber-300",
+    rose: "text-rose-600 dark:text-rose-300",
+  } as const;
+
+  return (
+    <p className={`text-xs font-semibold ${toneClasses[tone]}`}>
+      {label}: {value}
+    </p>
+  );
+}
+
+function InsightDistribution({
+  label,
+  count,
+  total,
+  tone,
+}: {
+  label: string;
+  count: number;
+  total: number;
+  tone: "emerald" | "indigo" | "amber" | "rose";
+}) {
+  const toneClasses = {
+    emerald: "bg-emerald-500",
+    indigo: "bg-indigo-500",
+    amber: "bg-amber-500",
+    rose: "bg-rose-500",
+  } as const;
+
+  const percent = total > 0 ? Math.round((count / total) * 100) : 0;
+
+  return (
+    <div>
+      <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
+        <span>{label}</span>
+        <span className="font-semibold text-slate-700 dark:text-slate-200">
+          {count} · {percent}%
+        </span>
+      </div>
+      <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
+        <div
+          className={`${toneClasses[tone]} h-full transition-all`}
+          style={{ width: `${Math.min(100, Math.max(0, percent))}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+function HistoricalOperationsTable({
+  operations,
+}: {
+  operations: Operation[];
+}) {
+  return (
+    <div className="mt-6 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm dark:border-slate-700 dark:bg-slate-800">
+      <table className="min-w-full divide-y divide-slate-200 text-left text-sm dark:divide-slate-700">
+        <thead className="bg-slate-100 text-xs uppercase tracking-wide text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+          <tr>
+            <th className="px-4 py-3">ID</th>
+            <th className="px-4 py-3">Símbolo</th>
+            <th className="px-4 py-3">Lado</th>
+            <th className="px-4 py-3">Quantidade</th>
+            <th className="px-4 py-3">Preço</th>
+            <th className="px-4 py-3">Modo</th>
+            <th className="px-4 py-3">Status</th>
+            <th className="px-4 py-3">Executado</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-slate-200 text-xs dark:divide-slate-700">
+          {operations.map((op) => (
+            <tr key={`${op.mode}-${op.id}-${op.client_order_id || ""}`} className="hover:bg-slate-100/60 dark:hover:bg-slate-700/40">
+              <td className="px-4 py-3 font-mono text-[11px] text-slate-500 dark:text-slate-400">
+                {op.client_order_id || op.id}
+              </td>
+              <td className="px-4 py-3 font-semibold text-slate-700 dark:text-slate-200">
+                {op.symbol}
+              </td>
+              <td className="px-4 py-3 text-slate-500 dark:text-slate-400">{op.side}</td>
+              <td className="px-4 py-3 text-slate-500 dark:text-slate-300">{op.quantity}</td>
+              <td className="px-4 py-3 text-slate-500 dark:text-slate-300">{op.price}</td>
+              <td className="px-4 py-3">
+                <span
+                  className={`rounded-full px-2 py-1 text-[11px] font-semibold ${
+                    op.mode === "PAPER"
+                      ? "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-200"
+                      : "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-200"
+                  }`}
+                >
+                  {op.mode}
+                </span>
+              </td>
+              <td className="px-4 py-3 text-slate-500 dark:text-slate-300">{op.status}</td>
+              <td className="px-4 py-3 text-slate-500 dark:text-slate-300">
+                {op.executed_at
+                  ? new Date(op.executed_at).toLocaleString()
+                  : "—"}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function ModeFilterPill({
+  label,
+  active,
+  onClick,
+  disabled,
+}: {
+  label: string;
+  active: boolean;
+  onClick: () => void;
+  disabled?: boolean;
+}) {
+  const baseClasses =
+    "rounded-full border px-3 py-1 text-xs font-semibold transition";
+  const activeClasses =
+    "border-indigo-400 bg-indigo-100 text-indigo-700 dark:border-indigo-500/60 dark:bg-indigo-900/60 dark:text-indigo-200";
+  const inactiveClasses =
+    "border-slate-200 bg-white text-slate-600 hover:border-indigo-300 hover:text-indigo-600 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-300 dark:hover:border-indigo-400 dark:hover:text-indigo-200";
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={`${baseClasses} ${
+        active ? activeClasses : inactiveClasses
+      } ${disabled ? "cursor-not-allowed opacity-60" : ""}`}
+    >
+      {label}
+    </button>
+  );
+}
+
+function StrategyRow({
+  strategy,
+  onToggleEnabled,
+  onModeChange,
+  disabled,
+  lastUpdatedAt,
+}: {
+  strategy: StrategyState;
+  onToggleEnabled: (strategyId: string, enabled: boolean) => Promise<void> | void;
+  onModeChange: (strategyId: string, mode: "REAL" | "PAPER") => Promise<void> | void;
+  disabled?: boolean;
+  lastUpdatedAt?: string | null;
+}) {
+  const modeBadgeClass =
+    strategy.mode === "REAL"
+      ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-200"
+      : "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-200";
+  const toggleClasses = strategy.enabled
+    ? "bg-rose-100 text-rose-700 hover:bg-rose-200 dark:bg-rose-900/40 dark:text-rose-200 dark:hover:bg-rose-900/60"
+    : "bg-emerald-100 text-emerald-700 hover:bg-emerald-200 dark:bg-emerald-900/40 dark:text-emerald-200 dark:hover:bg-emerald-900/60";
+
+  return (
+    <div className="flex flex-col gap-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm transition-colors dark:border-slate-700 dark:bg-slate-800">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <p className="text-sm font-semibold text-slate-800 dark:text-slate-100">
+            {strategy.strategy_id}
+          </p>
+          <p className="text-xs text-slate-500 dark:text-slate-400">
+            {strategy.enabled ? "Ativa" : "Pausada"} · modo {strategy.mode}
+          </p>
+          {lastUpdatedAt && (
+            <p className="text-[11px] text-slate-400 dark:text-slate-500">
+              Atualizada em {new Date(lastUpdatedAt).toLocaleString()}
+            </p>
+          )}
+        </div>
+        <span
+          className={`rounded-full px-3 py-1 text-xs font-semibold ${modeBadgeClass}`}
+        >
+          {strategy.mode}
+        </span>
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <ModeFilterPill
+          label="Paper"
+          active={strategy.mode === "PAPER"}
+          disabled={disabled}
+          onClick={() =>
+            void onModeChange(strategy.strategy_id, "PAPER")
+          }
+        />
+        <ModeFilterPill
+          label="Real"
+          active={strategy.mode === "REAL"}
+          disabled={disabled}
+          onClick={() =>
+            void onModeChange(strategy.strategy_id, "REAL")
+          }
+        />
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={() =>
+            void onToggleEnabled(strategy.strategy_id, !strategy.enabled)
+          }
+          className={`rounded-full px-3 py-1 text-xs font-semibold transition ${toggleClasses} ${
+            disabled ? "cursor-not-allowed opacity-60" : ""
+          }`}
+        >
+          {strategy.enabled ? "Pausar" : "Ativar"}
+        </button>
+      </div>
     </div>
   );
 }
@@ -936,6 +2581,27 @@ function ClipboardIcon(props: React.SVGProps<SVGSVGElement>) {
         d="M8 4h8a2 2 0 0 1 2 2v14H6V6a2 2 0 0 1 2-2z"
       />
       <path d="M9 2h6v3H9z" />
+    </svg>
+  );
+}
+
+function BeakerIcon(props: React.SVGProps<SVGSVGElement>) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      width="20"
+      height="20"
+      {...props}
+    >
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M9 3h6M9 3v6a4 4 0 0 1-1.107 2.758l-.04.042C5.298 13.5 6.748 18 10 18h4c3.252 0 4.702-4.5 3.147-6.2l-.04-.042A4 4 0 0 1 15 9V3"
+      />
+      <path strokeLinecap="round" strokeLinejoin="round" d="M8 13h8" />
     </svg>
   );
 }

@@ -9,6 +9,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -53,6 +55,11 @@ type Operation struct {
 	Mode          string    `json:"mode"`
 }
 
+type PortfolioResponse struct {
+	Cash      map[string]string `json:"cash"`
+	Positions []Position        `json:"positions"`
+}
+
 type LoginRequest struct {
 	Username string `json:"username" binding:"required"`
 	Password string `json:"password" binding:"required"`
@@ -67,10 +74,157 @@ type SetBotStatusPayload struct {
 	Status string `json:"status"`
 }
 
-type SetStrategyConfigPayload struct {
-	StrategyID string `json:"strategy_id"`
-	Enabled    bool   `json:"enabled"`
-	Mode       string `json:"mode"`
+type StrategyConfig struct {
+	StrategyID      string   `json:"strategy_id"`
+	Enabled         bool     `json:"enabled"`
+	Mode            string   `json:"mode"`
+	Symbols         []string `json:"symbols,omitempty"`
+	UsdBalance      string   `json:"usd_balance,omitempty"`
+	TakeProfitBps   int      `json:"take_profit_bps,omitempty"`
+	StopLossBps     int      `json:"stop_loss_bps,omitempty"`
+	FastWindow      int      `json:"fast_window,omitempty"`
+	SlowWindow      int      `json:"slow_window,omitempty"`
+	MinSignalBps    int      `json:"min_signal_bps,omitempty"`
+	PositionSizePct float64  `json:"position_size_pct,omitempty"`
+}
+
+type StrategyConfigRequest struct {
+	Enabled         *bool    `json:"enabled"`
+	Mode            *string  `json:"mode"`
+	Symbols         []string `json:"symbols"`
+	UsdBalance      *string  `json:"usd_balance"`
+	TakeProfitBps   *int     `json:"take_profit_bps"`
+	StopLossBps     *int     `json:"stop_loss_bps"`
+	FastWindow      *int     `json:"fast_window"`
+	SlowWindow      *int     `json:"slow_window"`
+	MinSignalBps    *int     `json:"min_signal_bps"`
+	PositionSizePct *float64 `json:"position_size_pct"`
+}
+
+var defaultStrategyConfigs = map[string]StrategyConfig{
+	"momentum-001": {
+		StrategyID: "momentum-001",
+		Enabled:    true,
+		Mode:       "PAPER",
+		Symbols:    []string{"BTC-USD"},
+	},
+	"advanced-alpha-001": {
+		StrategyID:      "advanced-alpha-001",
+		Enabled:         true,
+		Mode:            "PAPER",
+		Symbols:         []string{"BTC-USD", "ETH-USD", "SOL-USD"},
+		UsdBalance:      "25000",
+		TakeProfitBps:   120,
+		StopLossBps:     60,
+		FastWindow:      5,
+		SlowWindow:      21,
+		MinSignalBps:    20,
+		PositionSizePct: 0.15,
+	},
+}
+
+func cloneStrategyConfig(cfg StrategyConfig) StrategyConfig {
+	clone := cfg
+	if cfg.Symbols != nil {
+		clone.Symbols = append([]string(nil), cfg.Symbols...)
+	}
+	return clone
+}
+
+func normalizeSymbols(symbols []string) []string {
+	seen := make(map[string]struct{})
+	var result []string
+	for _, symbol := range symbols {
+		s := strings.ToUpper(strings.TrimSpace(symbol))
+		if s == "" {
+			continue
+		}
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		result = append(result, s)
+	}
+	return result
+}
+
+func applyDefaults(base, candidate StrategyConfig) StrategyConfig {
+	cfg := cloneStrategyConfig(candidate)
+	if cfg.StrategyID == "" {
+		cfg.StrategyID = base.StrategyID
+	}
+	if cfg.Mode == "" {
+		cfg.Mode = base.Mode
+	}
+	if len(cfg.Symbols) == 0 && len(base.Symbols) > 0 {
+		cfg.Symbols = append([]string(nil), base.Symbols...)
+	}
+	cfg.Symbols = normalizeSymbols(cfg.Symbols)
+	if cfg.UsdBalance == "" && base.UsdBalance != "" {
+		cfg.UsdBalance = base.UsdBalance
+	}
+	if cfg.TakeProfitBps == 0 && base.TakeProfitBps != 0 {
+		cfg.TakeProfitBps = base.TakeProfitBps
+	}
+	if cfg.StopLossBps == 0 && base.StopLossBps != 0 {
+		cfg.StopLossBps = base.StopLossBps
+	}
+	if cfg.FastWindow == 0 && base.FastWindow != 0 {
+		cfg.FastWindow = base.FastWindow
+	}
+	if cfg.SlowWindow == 0 && base.SlowWindow != 0 {
+		cfg.SlowWindow = base.SlowWindow
+	}
+	if cfg.MinSignalBps == 0 && base.MinSignalBps != 0 {
+		cfg.MinSignalBps = base.MinSignalBps
+	}
+	if cfg.PositionSizePct == 0 && base.PositionSizePct != 0 {
+		cfg.PositionSizePct = base.PositionSizePct
+	}
+	return cfg
+}
+
+func (h *ApiHandler) loadStrategyConfig(ctx context.Context, strategyID string) StrategyConfig {
+	base, ok := defaultStrategyConfigs[strategyID]
+	if !ok {
+		base = StrategyConfig{
+			StrategyID: strategyID,
+			Enabled:    true,
+			Mode:       "PAPER",
+		}
+	}
+	cfg := cloneStrategyConfig(base)
+
+	stateKey := fmt.Sprintf("%s%s", strategyConfigKeyPrefix, strings.ToLower(strategyID))
+	val, err := h.redisClient.Get(ctx, stateKey).Result()
+	if err == redis.Nil {
+		return cfg
+	}
+	if err != nil {
+		log.Printf("Erro ao ler config da estratégia (%s): %v", strategyID, err)
+		return cfg
+	}
+
+	var stored StrategyConfig
+	if err := json.Unmarshal([]byte(val), &stored); err != nil {
+		log.Printf("Erro ao deserializar config (%s): %v", strategyID, err)
+		return cfg
+	}
+
+	return applyDefaults(cfg, stored)
+}
+
+func (h *ApiHandler) saveStrategyConfig(ctx context.Context, cfg StrategyConfig) {
+	cfg.Symbols = normalizeSymbols(cfg.Symbols)
+	stateKey := fmt.Sprintf("%s%s", strategyConfigKeyPrefix, strings.ToLower(cfg.StrategyID))
+	payload, err := json.Marshal(cfg)
+	if err != nil {
+		log.Printf("Erro ao serializar config da estratégia %s: %v", cfg.StrategyID, err)
+		return
+	}
+	if err := h.redisClient.Set(ctx, stateKey, payload, 0).Err(); err != nil {
+		log.Printf("Aviso: não foi possível persistir config da estratégia %s: %v", cfg.StrategyID, err)
+	}
 }
 
 // Estrutura para injetar dependências
@@ -346,7 +500,25 @@ func (h *ApiHandler) getPortfolio(c *gin.Context) {
 		}
 	}
 
-	c.JSON(http.StatusOK, positions)
+	cashBalances := make(map[string]string)
+	if cashPaper, err := h.redisClient.Get(ctx, "wallet:paper:USD").Result(); err == nil && cashPaper != "" {
+		cashBalances["PAPER"] = cashPaper
+	}
+	if cashReal, err := h.redisClient.Get(ctx, "wallet:real:USD").Result(); err == nil && cashReal != "" {
+		cashBalances["REAL"] = cashReal
+	}
+
+	if _, ok := cashBalances["PAPER"]; !ok {
+		advanced := h.loadStrategyConfig(ctx, "advanced-alpha-001")
+		if advanced.UsdBalance != "" {
+			cashBalances["PAPER"] = advanced.UsdBalance
+		}
+	}
+
+	c.JSON(http.StatusOK, PortfolioResponse{
+		Cash:      cashBalances,
+		Positions: positions,
+	})
 }
 
 func (h *ApiHandler) getOperations(c *gin.Context) {
@@ -360,16 +532,56 @@ func (h *ApiHandler) getOperations(c *gin.Context) {
 	limit := c.DefaultQuery("limit", "100")
 
 	query := `
-        SELECT id, client_order_id, symbol, side, order_type, quantity::text, price::text, status,
-               NULL::timestamptz as executed_at, NULL::text as fee, 'REAL' as mode
-        FROM orders
-        WHERE ($1 = 'ALL' OR mode = $1)
-        UNION ALL
-        SELECT f.id, o.client_order_id, f.symbol, f.side, NULL::text as order_type, f.quantity::text, f.price::text, 'FILLED' as status,
-               f.executed_at, f.fee::text, 'REAL' as mode
-        FROM fills f JOIN orders o ON f.order_id = o.id
-        WHERE ($1 = 'ALL' OR mode = $1)
-        ORDER BY COALESCE(executed_at, created_at) DESC
+        WITH combined AS (
+            SELECT
+                o.id,
+                o.client_order_id,
+                o.symbol,
+                o.side,
+                o.order_type,
+                o.quantity::text,
+                o.price::text,
+                o.status,
+                NULL::timestamptz AS executed_at,
+                NULL::text AS fee,
+                o.mode,
+                o.created_at AS order_ts
+            FROM orders o
+            WHERE ($1 = 'ALL' OR o.mode = $1)
+
+            UNION ALL
+
+            SELECT
+                f.id,
+                o.client_order_id,
+                f.symbol,
+                f.side,
+                NULL::text AS order_type,
+                f.quantity::text,
+                f.price::text,
+                'FILLED' AS status,
+                f.executed_at,
+                f.fee::text,
+                o.mode,
+                f.executed_at AS order_ts
+            FROM fills f
+            JOIN orders o ON f.order_id = o.id
+            WHERE ($1 = 'ALL' OR o.mode = $1)
+        )
+        SELECT
+            id,
+            client_order_id,
+            symbol,
+            side,
+            order_type,
+            quantity,
+            price,
+            status,
+            executed_at,
+            fee,
+            mode
+        FROM combined
+        ORDER BY order_ts DESC NULLS LAST
         LIMIT $2`
 
 	rows, err := h.dbPool.Query(ctx, query, modeFilter, limit)
@@ -452,22 +664,111 @@ func (h *ApiHandler) setBotStatus(c *gin.Context) {
 func (h *ApiHandler) setStrategyConfig(c *gin.Context) {
 	strategyID := c.Param("strategy_id")
 
-	var req struct {
-		Enabled *bool  `json:"enabled" binding:"required"`
-		Mode    string `json:"mode" binding:"required,oneof=REAL PAPER"`
-	}
+	var req StrategyConfigRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Pedido inválido: 'enabled' (boolean) e 'mode' (REAL/PAPER) são obrigatórios"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Pedido inválido: reveja os campos enviados"})
 		return
+	}
+
+	if req.Enabled == nil &&
+		req.Mode == nil &&
+		req.Symbols == nil &&
+		req.UsdBalance == nil &&
+		req.TakeProfitBps == nil &&
+		req.StopLossBps == nil &&
+		req.FastWindow == nil &&
+		req.SlowWindow == nil &&
+		req.MinSignalBps == nil &&
+		req.PositionSizePct == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Pedido inválido: forneça pelo menos um campo para atualização"})
+		return
+	}
+
+	ctx := context.Background()
+	cfg := h.loadStrategyConfig(ctx, strategyID)
+	cfg.StrategyID = strategyID
+
+	if req.Enabled != nil {
+		cfg.Enabled = *req.Enabled
+	}
+
+	if req.Mode != nil {
+		mode := strings.ToUpper(strings.TrimSpace(*req.Mode))
+		if mode != "REAL" && mode != "PAPER" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Modo inválido. Utilize REAL ou PAPER."})
+			return
+		}
+		cfg.Mode = mode
+	}
+
+	if req.Symbols != nil {
+		cfg.Symbols = normalizeSymbols(req.Symbols)
+	}
+
+	if req.UsdBalance != nil {
+		if _, err := strconv.ParseFloat(strings.TrimSpace(*req.UsdBalance), 64); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "usd_balance deve ser numérico"})
+			return
+		}
+		cfg.UsdBalance = strings.TrimSpace(*req.UsdBalance)
+	}
+
+	if req.TakeProfitBps != nil {
+		if *req.TakeProfitBps < 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "take_profit_bps deve ser >= 0"})
+			return
+		}
+		cfg.TakeProfitBps = *req.TakeProfitBps
+	}
+
+	if req.StopLossBps != nil {
+		if *req.StopLossBps < 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "stop_loss_bps deve ser >= 0"})
+			return
+		}
+		cfg.StopLossBps = *req.StopLossBps
+	}
+
+	if req.FastWindow != nil {
+		if *req.FastWindow < 2 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "fast_window deve ser >= 2"})
+			return
+		}
+		cfg.FastWindow = *req.FastWindow
+	}
+
+	if req.SlowWindow != nil {
+		if *req.SlowWindow <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "slow_window deve ser > 0"})
+			return
+		}
+		cfg.SlowWindow = *req.SlowWindow
+	}
+
+	if cfg.SlowWindow != 0 && cfg.FastWindow != 0 && cfg.SlowWindow <= cfg.FastWindow {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "slow_window deve ser maior que fast_window"})
+		return
+	}
+
+	if req.MinSignalBps != nil {
+		if *req.MinSignalBps < 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "min_signal_bps deve ser >= 0"})
+			return
+		}
+		cfg.MinSignalBps = *req.MinSignalBps
+	}
+
+	if req.PositionSizePct != nil {
+		if *req.PositionSizePct <= 0 || *req.PositionSizePct > 1 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "position_size_pct deve estar entre 0 e 1"})
+			return
+		}
+		cfg.PositionSizePct = *req.PositionSizePct
 	}
 
 	command := ControlCommand{
 		Command: "SET_STRATEGY_CONFIG",
-		Payload: SetStrategyConfigPayload{
-			StrategyID: strategyID,
-			Enabled:    *req.Enabled,
-			Mode:       req.Mode,
-		},
+		Payload: cfg,
 	}
 
 	commandJSON, err := json.Marshal(command)
@@ -486,29 +787,27 @@ func (h *ApiHandler) setStrategyConfig(c *gin.Context) {
 		return
 	}
 
-	log.Printf("Comando SET_STRATEGY_CONFIG para %s (Enabled: %t, Mode: %s) publicado", strategyID, *req.Enabled, req.Mode)
+	log.Printf("Comando SET_STRATEGY_CONFIG para %s publicado · Enabled: %t · Mode: %s", strategyID, cfg.Enabled, cfg.Mode)
 
-	stateKey := fmt.Sprintf("%s%s", strategyConfigKeyPrefix, strings.ToLower(strategyID))
-	if payloadJSON, err := json.Marshal(command.Payload); err == nil {
-		if err := h.redisClient.Set(context.Background(), stateKey, payloadJSON, 0).Err(); err != nil {
-			log.Printf("Aviso: não foi possível persistir config da estratégia %s: %v", strategyID, err)
+	h.saveStrategyConfig(ctx, cfg)
+
+	if cfg.UsdBalance != "" {
+		walletKey := "wallet:paper:USD"
+		if err := h.redisClient.Set(ctx, walletKey, cfg.UsdBalance, 0).Err(); err != nil {
+			log.Printf("Aviso: não foi possível atualizar saldo %s: %v", walletKey, err)
 		}
-	} else {
-		log.Printf("Aviso: falha ao serializar config para armazenamento local: %v", err)
 	}
 
-	c.JSON(http.StatusAccepted, gin.H{"message": "Comando aceite"})
+	c.JSON(http.StatusAccepted, gin.H{
+		"message": "Comando aceite",
+		"config":  cfg,
+	})
 }
 
 func (h *ApiHandler) getControlState(c *gin.Context) {
-	type strategyState struct {
-		StrategyID string `json:"strategy_id"`
-		Enabled    bool   `json:"enabled"`
-		Mode       string `json:"mode"`
-	}
 	type controlState struct {
-		BotStatus  string          `json:"bot_status"`
-		Strategies []strategyState `json:"strategies"`
+		BotStatus  string           `json:"bot_status"`
+		Strategies []StrategyConfig `json:"strategies"`
 	}
 
 	ctx := context.Background()
@@ -520,7 +819,7 @@ func (h *ApiHandler) getControlState(c *gin.Context) {
 		botStatus = "UNKNOWN"
 	}
 
-	var strategies []strategyState
+	strategyMap := make(map[string]StrategyConfig)
 	iter := h.redisClient.Scan(ctx, 0, strategyConfigKeyPrefix+"*", 0).Iterator()
 	for iter.Next(ctx) {
 		key := iter.Val()
@@ -529,22 +828,42 @@ func (h *ApiHandler) getControlState(c *gin.Context) {
 			log.Printf("Erro ao ler config da estratégia (%s): %v", key, err)
 			continue
 		}
-		var payload SetStrategyConfigPayload
+		var payload StrategyConfig
 		if err := json.Unmarshal([]byte(val), &payload); err != nil {
 			log.Printf("Erro ao deserializar config (%s): %v", key, err)
 			continue
 		}
 
 		strategyID := strings.TrimPrefix(key, strategyConfigKeyPrefix)
-		strategies = append(strategies, strategyState{
-			StrategyID: strategyID,
-			Enabled:    payload.Enabled,
-			Mode:       payload.Mode,
-		})
+		base, ok := defaultStrategyConfigs[strategyID]
+		if !ok {
+			base = StrategyConfig{
+				StrategyID: strategyID,
+				Enabled:    true,
+				Mode:       "PAPER",
+			}
+		}
+		payload.StrategyID = strategyID
+		strategyMap[strategyID] = applyDefaults(base, payload)
 	}
 	if err := iter.Err(); err != nil {
 		log.Printf("Erro ao iterar configs de estratégias: %v", err)
 	}
+
+	// Inclui defaults para estratégias conhecidas não configuradas
+	for strategyID, cfg := range defaultStrategyConfigs {
+		if _, ok := strategyMap[strategyID]; !ok {
+			strategyMap[strategyID] = cloneStrategyConfig(cfg)
+		}
+	}
+
+	var strategies []StrategyConfig
+	for _, cfg := range strategyMap {
+		strategies = append(strategies, cfg)
+	}
+	sort.Slice(strategies, func(i, j int) bool {
+		return strategies[i].StrategyID < strategies[j].StrategyID
+	})
 
 	state := controlState{
 		BotStatus:  botStatus,

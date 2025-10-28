@@ -7,6 +7,7 @@ use contracts::{
 use redis::AsyncCommands; // <-- NOVO
 use std::collections::HashMap;
 use std::convert::TryFrom;
+use std::env;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -25,11 +26,16 @@ const ORDER_MANAGER_ADDR: &str = "http://[::1]:50052";
 const REDIS_ADDR: &str = "redis://127.0.0.1/";
 
 // --- Definição dos Nossos Limites de Risco ---
+fn load_decimal_env(var: &str, default: &str) -> BigDecimal {
+    let raw = env::var(var).ok();
+    raw.as_deref()
+        .and_then(|value| BigDecimal::from_str(value).ok())
+        .unwrap_or_else(|| BigDecimal::from_str(default).expect("default decimal literal"))
+}
+
 lazy_static::lazy_static! {
-    // Limite máximo por ordem (definido na Fase 1: $10)
-    static ref MAX_ORDER_NOTIONAL: BigDecimal = BigDecimal::from(10);
-    // Limite máximo de exposição por ativo (definido na Fase 1: $50)
-    static ref MAX_POSITION_NOTIONAL: BigDecimal = BigDecimal::from(50);
+    static ref MAX_ORDER_NOTIONAL: BigDecimal = load_decimal_env("RISK_MAX_ORDER_NOTIONAL", "10");
+    static ref MAX_POSITION_NOTIONAL: BigDecimal = load_decimal_env("RISK_MAX_POSITION_NOTIONAL", "5000");
 }
 
 // Estrutura para armazenar a nossa posição
@@ -179,6 +185,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     info!("A ligar-se ao OrderManager em {}...", order_manager_addr);
     let order_manager_client = OrderExecutorClient::connect(order_manager_addr).await?;
+    info!(
+        "Limites configurados -> ordem: {} / posição: {}",
+        *MAX_ORDER_NOTIONAL, *MAX_POSITION_NOTIONAL
+    );
 
     // Conexão com o Redis (opcional para DEV)
     let use_redis = std::env::var("RISK_USE_REDIS").unwrap_or_else(|_| "1".into()) != "0";

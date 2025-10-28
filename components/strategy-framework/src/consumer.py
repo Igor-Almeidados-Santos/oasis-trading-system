@@ -2,6 +2,7 @@ import os
 import asyncio
 import logging
 import json
+from typing import Dict
 import grpc
 from confluent_kafka import Consumer, KafkaError
 from dotenv import load_dotenv
@@ -19,7 +20,9 @@ except ImportError:  # fallback quando os módulos gerados usam caminhos absolut
     import actions_pb2  # type: ignore
     import actions_pb2_grpc  # type: ignore
 
+from strategy import Strategy
 from strategies.momentum import SimpleMomentum
+from strategies.advanced_profit import AdvancedProfitStrategy
 
 # Métricas Prometheus (mantém fallback quando o pacote não está disponível)
 try:
@@ -65,7 +68,7 @@ SIGNAL_VALIDATION_RESULT = Counter(
 
 # --- Estado Global do Bot ---
 bot_status = "RUNNING"
-active_strategies: dict[str, SimpleMomentum] = {}
+active_strategies: Dict[str, Strategy] = {}
 
 
 async def consume_control_commands(command_consumer: Consumer) -> None:
@@ -105,6 +108,14 @@ async def consume_control_commands(command_consumer: Consumer) -> None:
                     strategy_id = payload.get("strategy_id")
                     enabled = payload.get("enabled")
                     mode = payload.get("mode")
+                    symbols = payload.get("symbols")
+                    usd_balance = payload.get("usd_balance")
+                    take_profit_bps = payload.get("take_profit_bps")
+                    stop_loss_bps = payload.get("stop_loss_bps")
+                    fast_window = payload.get("fast_window")
+                    slow_window = payload.get("slow_window")
+                    min_signal_bps = payload.get("min_signal_bps")
+                    position_size_pct = payload.get("position_size_pct")
 
                     strategy = active_strategies.get(strategy_id)
                     if strategy is None:
@@ -119,6 +130,102 @@ async def consume_control_commands(command_consumer: Consumer) -> None:
                             strategy.set_mode(mode)
                         except ValueError:
                             log.error("[Comandos] Modo inválido recebido para '%s': %s", strategy_id, mode)
+
+                    if symbols is not None and hasattr(strategy, "set_symbols"):
+                        try:
+                            if isinstance(symbols, str):
+                                parsed_symbols = [
+                                    item.strip()
+                                    for item in symbols.split(",")
+                                    if item.strip()
+                                ]
+                            elif isinstance(symbols, list):
+                                parsed_symbols = symbols
+                            else:
+                                raise TypeError(f"tipo inválido para symbols: {type(symbols)}")
+                            strategy.set_symbols(parsed_symbols)
+                        except Exception as err:  # noqa: BLE001
+                            log.error(
+                                "[Comandos] Falha ao atualizar símbolos de %s: %s",
+                                strategy_id,
+                                err,
+                            )
+
+                    if usd_balance is not None and hasattr(strategy, "set_cash_balance"):
+                        try:
+                            strategy.set_cash_balance(float(usd_balance))
+                        except (TypeError, ValueError):
+                            log.error(
+                                "[Comandos] Valor de saldo USD inválido para '%s': %s",
+                                strategy_id,
+                                usd_balance,
+                            )
+
+                    parameter_kwargs = {}
+                    if take_profit_bps is not None:
+                        try:
+                            parameter_kwargs["take_profit"] = float(take_profit_bps) / 10_000.0
+                        except (TypeError, ValueError):
+                            log.error(
+                                "[Comandos] take_profit_bps inválido para '%s': %s",
+                                strategy_id,
+                                take_profit_bps,
+                            )
+                    if stop_loss_bps is not None:
+                        try:
+                            parameter_kwargs["stop_loss"] = float(stop_loss_bps) / 10_000.0
+                        except (TypeError, ValueError):
+                            log.error(
+                                "[Comandos] stop_loss_bps inválido para '%s': %s",
+                                strategy_id,
+                                stop_loss_bps,
+                            )
+                    if fast_window is not None:
+                        try:
+                            parameter_kwargs["fast_window"] = int(fast_window)
+                        except (TypeError, ValueError):
+                            log.error(
+                                "[Comandos] fast_window inválido para '%s': %s",
+                                strategy_id,
+                                fast_window,
+                            )
+                    if slow_window is not None:
+                        try:
+                            parameter_kwargs["slow_window"] = int(slow_window)
+                        except (TypeError, ValueError):
+                            log.error(
+                                "[Comandos] slow_window inválido para '%s': %s",
+                                strategy_id,
+                                slow_window,
+                            )
+                    if min_signal_bps is not None:
+                        try:
+                            parameter_kwargs["min_signal_strength"] = float(min_signal_bps) / 10_000.0
+                        except (TypeError, ValueError):
+                            log.error(
+                                "[Comandos] min_signal_bps inválido para '%s': %s",
+                                strategy_id,
+                                min_signal_bps,
+                            )
+                    if position_size_pct is not None:
+                        try:
+                            parameter_kwargs["position_size_pct"] = float(position_size_pct)
+                        except (TypeError, ValueError):
+                            log.error(
+                                "[Comandos] position_size_pct inválido para '%s': %s",
+                                strategy_id,
+                                position_size_pct,
+                            )
+
+                    if parameter_kwargs and hasattr(strategy, "update_parameters"):
+                        try:
+                            strategy.update_parameters(**parameter_kwargs)
+                        except Exception as err:  # noqa: BLE001
+                            log.error(
+                                "[Comandos] Falha ao atualizar parâmetros de %s: %s",
+                                strategy_id,
+                                err,
+                            )
 
                 else:
                     log.error("[Comandos] Tipo de comando desconhecido: %s", command)
@@ -241,6 +348,41 @@ async def main() -> None:
     strategy = SimpleMomentum(strategy_id="momentum-001", symbol_to_watch=os.getenv("SYMBOL", "BTC-USD"))
     active_strategies[strategy.strategy_id] = strategy
     log.info("Estratégia '%s' carregada.", strategy.strategy_id)
+
+    advanced_symbols = [
+        symbol.strip().upper()
+        for symbol in os.getenv("ADVANCED_STRATEGY_SYMBOLS", "BTC-USD,ETH-USD,SOL-USD").split(",")
+        if symbol.strip()
+    ]
+    advanced_cash = float(os.getenv("ADVANCED_STRATEGY_CASH", "25000"))
+    advanced_strategy = AdvancedProfitStrategy(
+        strategy_id="advanced-alpha-001",
+        symbols=advanced_symbols,
+        initial_cash=advanced_cash,
+    )
+    try:
+        take_profit = float(os.getenv("ADVANCED_STRATEGY_TAKE_PROFIT_BPS", "120")) / 10_000.0
+        stop_loss = float(os.getenv("ADVANCED_STRATEGY_STOP_LOSS_BPS", "60")) / 10_000.0
+        fast_window = int(os.getenv("ADVANCED_STRATEGY_FAST_WINDOW", "5"))
+        slow_window = int(os.getenv("ADVANCED_STRATEGY_SLOW_WINDOW", "21"))
+        min_signal = float(os.getenv("ADVANCED_STRATEGY_MIN_SIGNAL_BPS", "20")) / 10_000.0
+        position_pct = float(os.getenv("ADVANCED_STRATEGY_POSITION_SIZE_PCT", "0.15"))
+        advanced_strategy.update_parameters(
+            fast_window=fast_window,
+            slow_window=slow_window,
+            min_signal_strength=min_signal,
+            take_profit=take_profit,
+            stop_loss=stop_loss,
+            position_size_pct=position_pct,
+        )
+    except Exception as err:  # noqa: BLE001
+        log.warning("Não foi possível aplicar parâmetros iniciais da estratégia avançada: %s", err)
+    active_strategies[advanced_strategy.strategy_id] = advanced_strategy
+    log.info(
+        "Estratégia '%s' carregada com símbolos %s.",
+        advanced_strategy.strategy_id,
+        ", ".join(advanced_symbols) or "(nenhum)",
+    )
 
     # Inicia tarefas
     market_task = asyncio.create_task(run_market_data_consumer(market_consumer, risk_stub))
