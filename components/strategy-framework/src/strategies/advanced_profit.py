@@ -1,1 +1,266 @@
-"\"\"\"Advanced multi-asset trading strategy focused on trend following + risk control.\"\"\"\n+\n+from __future__ import annotations\n+\n+from collections import deque\n+from dataclasses import dataclass\n+import logging\n+from typing import Deque, Dict, Iterable, List\n+\n+from google.protobuf.timestamp_pb2 import Timestamp\n+\n+from generated import actions_pb2, market_data_pb2\n+from strategy import Strategy\n+\n+log = logging.getLogger(__name__)\n+\n+\n+@dataclass\n+class StrategyParameters:\n+    fast_window: int = 5\n+    slow_window: int = 21\n+    min_signal_strength: float = 0.002  # 20 bps\n+    take_profit: float = 0.012          # 1.2%\n+    stop_loss: float = 0.006            # 0.6%\n+    position_size_pct: float = 0.10     # 10% do capital disponível\n+\n+\n+class AdvancedProfitStrategy(Strategy):\n+    \"\"\"Trend/momentum strategy that alternates between long/flat positions.\n+\n+    The strategy monitors a configurable list of symbols, keeping short/long\n+    moving averages to detect breakouts. When the fast average crosses the slow\n+    average with sufficient strength it emits BUY signals. Once in position it\n+    monitors both take-profit and stop-loss thresholds to secure profits.\n+    \"\"\"\n+\n+    def __init__(self, strategy_id: str, symbols: Iterable[str], *, parameters: StrategyParameters | None = None,\n+                 initial_cash: float = 10_000.0) -> None:\n+        super().__init__(strategy_id)\n+        self._parameters = parameters or StrategyParameters()\n+        self._symbols: set[str] = set()\n+        self._price_history: Dict[str, Deque[float]] = {}\n+        self._position_state: Dict[str, str] = {}\n+        self._entry_price: Dict[str, float] = {}\n+        self._last_price: Dict[str, float] = {}\n+        self._cash_balance: float = max(initial_cash, 0.0)\n+        self.set_symbols(symbols)\n+\n+    # ------------------------------------------------------------------\n+    # Configuration helpers\n+    # ------------------------------------------------------------------\n+    def set_symbols(self, symbols: Iterable[str]) -> None:\n+        updated = {symbol.upper() for symbol in symbols if symbol}\n+        removed = self._symbols - updated\n+        added = updated - self._symbols\n+\n+        if added:\n+            log.info(\"[%s] Adicionando símbolos à estratégia: %s\", self.strategy_id, \", \".join(sorted(added)))\n+        if removed:\n+            log.info(\"[%s] Removendo símbolos da estratégia: %s\", self.strategy_id, \", \".join(sorted(removed)))\n+\n+        self._symbols = updated\n+\n+        # Garante que o estado interno acompanha a nova lista\n+        for symbol in added:\n+            self._price_history[symbol] = deque(maxlen=max(self._parameters.slow_window, 50))\n+            self._position_state.setdefault(symbol, \"FLAT\")\n+\n+        for symbol in removed:\n+            self._price_history.pop(symbol, None)\n+            self._position_state.pop(symbol, None)\n+            self._entry_price.pop(symbol, None)\n+            self._last_price.pop(symbol, None)\n+\n+    def set_cash_balance(self, amount: float) -> None:\n+        if amount < 0:\n+            log.warning(\"[%s] Cash balance negativo recebido (%.2f). Normalizando para 0.\", self.strategy_id, amount)\n+            amount = 0.0\n+        self._cash_balance = float(amount)\n+        log.info(\"[%s] Novo saldo de caixa configurado: %.2f USD\", self.strategy_id, self._cash_balance)\n+\n+    def update_parameters(\n+        self,\n+        *,\n+        fast_window: int | None = None,\n+        slow_window: int | None = None,\n+        min_signal_strength: float | None = None,\n+        take_profit: float | None = None,\n+        stop_loss: float | None = None,\n+        position_size_pct: float | None = None,\n+    ) -> None:\n+        params = self._parameters\n+\n+        if fast_window is not None and fast_window > 1:\n+            params.fast_window = fast_window\n+        if slow_window is not None and slow_window > params.fast_window:\n+            params.slow_window = slow_window\n+        if min_signal_strength is not None and min_signal_strength > 0:\n+            params.min_signal_strength = min_signal_strength\n+        if take_profit is not None and take_profit > 0:\n+            params.take_profit = take_profit\n+        if stop_loss is not None and stop_loss > 0:\n+            params.stop_loss = stop_loss\n+        if position_size_pct is not None and 0 < position_size_pct <= 1:\n+            params.position_size_pct = position_size_pct\n+\n+        # Atualiza histórico para refletir janelas novas\n+        max_window = max(params.slow_window, 50)\n+        for symbol in list(self._price_history.keys()):\n+            history = self._price_history[symbol]\n+            if history.maxlen != max_window:\n+                self._price_history[symbol] = deque(history, maxlen=max_window)\n+\n+        log.info(\n+            \"[%s] Parâmetros atualizados: fast=%d slow=%d min_signal=%.4f TP=%.4f SL=%.4f pos%%=%.2f\",\n+            self.strategy_id,\n+            params.fast_window,\n+            params.slow_window,\n+            params.min_signal_strength,\n+            params.take_profit,\n+            params.stop_loss,\n+            params.position_size_pct,\n+        )\n+\n+    # ------------------------------------------------------------------\n+    # Trading logic\n+    # ------------------------------------------------------------------\n+    async def on_trade(\n+        self,\n+        trade_update: market_data_pb2.TradeUpdate,\n+        header: market_data_pb2.Header,\n+    ) -> List[actions_pb2.TradingSignal]:\n+        if not self.enabled:\n+            return []\n+\n+        symbol = header.symbol.upper()\n+        if symbol not in self._symbols:\n+            return []\n+\n+        price = float(trade_update.price)\n+        history = self._price_history.setdefault(\n+            symbol,\n+            deque(maxlen=max(self._parameters.slow_window, 50)),\n+        )\n+        history.append(price)\n+        self._last_price[symbol] = price\n+\n+        if len(history) < self._parameters.slow_window:\n+            # Espera acumular histórico suficiente\n+            return []\n+\n+        params = self._parameters\n+        fast_window = min(params.fast_window, len(history))\n+        slow_window = min(params.slow_window, len(history))\n+\n+        history_list = list(history)\n+        fast_avg = sum(history_list[-fast_window:]) / fast_window\n+        slow_avg = sum(history_list[-slow_window:]) / slow_window\n+\n+        if slow_avg <= 0:\n+            return []\n+\n+        signal_strength = (fast_avg - slow_avg) / slow_avg\n+        state = self._position_state.get(symbol, \"FLAT\")\n+        signals: List[actions_pb2.TradingSignal] = []\n+\n+        timestamp = Timestamp()\n+        timestamp.GetCurrentTime()\n+\n+        # Condições de entrada (compra)\n+        if state != \"LONG\" and signal_strength > params.min_signal_strength:\n+            log.info(\n+                \"[%s] BUY sinal %s | fast %.2f slow %.2f strength %.4f\",\n+                self.strategy_id,\n+                symbol,\n+                fast_avg,\n+                slow_avg,\n+                signal_strength,\n+            )\n+            signals.append(\n+                actions_pb2.TradingSignal(\n+                    strategy_id=self.strategy_id,\n+                    symbol=symbol,\n+                    side=\"BUY\",\n+                    confidence=min(0.99, 0.5 + abs(signal_strength) * 10),\n+                    signal_timestamp=timestamp,\n+                    mode=self.mode,\n+                )\n+            )\n+            self._position_state[symbol] = \"LONG\"\n+            self._entry_price[symbol] = price\n+            return signals\n+\n+        if state == \"LONG\":\n+            entry_price = self._entry_price.get(symbol, price)\n+            unrealized = (price - entry_price) / entry_price if entry_price else 0.0\n+\n+            exit_reasons: list[str] = []\n+            if unrealized >= params.take_profit:\n+                exit_reasons.append(\"take_profit\")\n+            if unrealized <= -params.stop_loss:\n+                exit_reasons.append(\"stop_loss\")\n+            if signal_strength < -params.min_signal_strength:\n+                exit_reasons.append(\"trend_reversal\")\n+\n+            if exit_reasons:\n+                log.info(\n+                    \"[%s] SELL sinal %s | motivos=%s gain=%.4f\",\n+                    self.strategy_id,\n+                    symbol,\n+                    \",\".join(exit_reasons),\n+                    unrealized,\n+                )\n+                signals.append(\n+                    actions_pb2.TradingSignal(\n+                        strategy_id=self.strategy_id,\n+                        symbol=symbol,\n+                        side=\"SELL\",\n+                        confidence=min(0.99, 0.6 + abs(unrealized) * 12),\n+                        signal_timestamp=timestamp,\n+                        mode=self.mode,\n+                    )\n+                )\n+                self._position_state[symbol] = \"FLAT\"\n+                self._entry_price.pop(symbol, None)\n+\n+        return signals\n+\n+    # ------------------------------------------------------------------\n+    # Introspection helpers (useful for the dashboard)\n+    # ------------------------------------------------------------------\n+    def snapshot(self) -> dict:\n+        return {\n+            \"strategy_id\": self.strategy_id,\n+            \"symbols\": sorted(self._symbols),\n+            \"parameters\": self._parameters.__dict__,\n+            \"cash_balance\": self._cash_balance,\n+            \"positions\": self._position_state.copy(),\n+            \"entry_prices\": self._entry_price.copy(),\n+        }\n+\n*** End Patch
+"""Advanced multi-asset trading strategy focused on trend following + risk control."""
+
+from __future__ import annotations
+
+from collections import deque
+from dataclasses import dataclass
+import logging
+from typing import Deque, Dict, Iterable, List
+
+from google.protobuf.timestamp_pb2 import Timestamp
+
+from generated import actions_pb2, market_data_pb2
+from strategy import Strategy
+
+log = logging.getLogger(__name__)
+
+
+@dataclass
+class StrategyParameters:
+    fast_window: int = 5
+    slow_window: int = 21
+    min_signal_strength: float = 0.002  # 20 bps
+    take_profit: float = 0.012          # 1.2%
+    stop_loss: float = 0.006            # 0.6%
+    position_size_pct: float = 0.10     # 10% do capital disponível
+
+
+class AdvancedProfitStrategy(Strategy):
+    """Trend/momentum strategy that alternates between long/flat positions.
+
+    The strategy monitors a configurable list of symbols, keeping short/long
+    moving averages to detect breakouts. When the fast average crosses the slow
+    average with sufficient strength it emits BUY signals. Once in position it
+    monitors both take-profit and stop-loss thresholds to secure profits.
+    """
+
+    def __init__(
+        self,
+        strategy_id: str,
+        symbols: Iterable[str],
+        *,
+        parameters: StrategyParameters | None = None,
+        initial_cash: float = 10_000.0,
+    ) -> None:
+        super().__init__(strategy_id)
+        self._parameters = parameters or StrategyParameters()
+        self._symbols: set[str] = set()
+        self._price_history: Dict[str, Deque[float]] = {}
+        self._position_state: Dict[str, str] = {}
+        self._entry_price: Dict[str, float] = {}
+        self._last_price: Dict[str, float] = {}
+        self._cash_balance: float = max(initial_cash, 0.0)
+        self.set_symbols(symbols)
+
+    # ------------------------------------------------------------------
+    # Configuration helpers
+    # ------------------------------------------------------------------
+    def set_symbols(self, symbols: Iterable[str]) -> None:
+        updated = {symbol.upper() for symbol in symbols if symbol}
+        removed = self._symbols - updated
+        added = updated - self._symbols
+
+        if added:
+            log.info(
+                "[%s] Adicionando símbolos à estratégia: %s",
+                self.strategy_id,
+                ", ".join(sorted(added)),
+            )
+        if removed:
+            log.info(
+                "[%s] Removendo símbolos da estratégia: %s",
+                self.strategy_id,
+                ", ".join(sorted(removed)),
+            )
+
+        self._symbols = updated
+
+        # Garante que o estado interno acompanha a nova lista
+        for symbol in added:
+            self._price_history[symbol] = deque(
+                maxlen=max(self._parameters.slow_window, 50)
+            )
+            self._position_state.setdefault(symbol, "FLAT")
+
+        for symbol in removed:
+            self._price_history.pop(symbol, None)
+            self._position_state.pop(symbol, None)
+            self._entry_price.pop(symbol, None)
+            self._last_price.pop(symbol, None)
+
+    def set_cash_balance(self, amount: float) -> None:
+        if amount < 0:
+            log.warning(
+                "[%s] Cash balance negativo recebido (%.2f). Normalizando para 0.",
+                self.strategy_id,
+                amount,
+            )
+            amount = 0.0
+        self._cash_balance = float(amount)
+        log.info(
+            "[%s] Novo saldo de caixa configurado: %.2f USD",
+            self.strategy_id,
+            self._cash_balance,
+        )
+
+    def update_parameters(
+        self,
+        *,
+        fast_window: int | None = None,
+        slow_window: int | None = None,
+        min_signal_strength: float | None = None,
+        take_profit: float | None = None,
+        stop_loss: float | None = None,
+        position_size_pct: float | None = None,
+    ) -> None:
+        params = self._parameters
+
+        if fast_window is not None and fast_window > 1:
+            params.fast_window = fast_window
+        if slow_window is not None and slow_window > params.fast_window:
+            params.slow_window = slow_window
+        if min_signal_strength is not None and min_signal_strength > 0:
+            params.min_signal_strength = min_signal_strength
+        if take_profit is not None and take_profit > 0:
+            params.take_profit = take_profit
+        if stop_loss is not None and stop_loss > 0:
+            params.stop_loss = stop_loss
+        if position_size_pct is not None and 0 < position_size_pct <= 1:
+            params.position_size_pct = position_size_pct
+
+        # Atualiza histórico para refletir janelas novas
+        max_window = max(params.slow_window, 50)
+        for symbol in list(self._price_history.keys()):
+            history = self._price_history[symbol]
+            if history.maxlen != max_window:
+                self._price_history[symbol] = deque(history, maxlen=max_window)
+
+        log.info(
+            "[%s] Parâmetros atualizados: fast=%d slow=%d min_signal=%.4f TP=%.4f SL=%.4f pos%%=%.2f",
+            self.strategy_id,
+            params.fast_window,
+            params.slow_window,
+            params.min_signal_strength,
+            params.take_profit,
+            params.stop_loss,
+            params.position_size_pct,
+        )
+
+    # ------------------------------------------------------------------
+    # Trading logic
+    # ------------------------------------------------------------------
+    async def on_trade(
+        self,
+        trade_update: market_data_pb2.TradeUpdate,
+        header: market_data_pb2.Header,
+    ) -> List[actions_pb2.TradingSignal]:
+        if not self.enabled:
+            return []
+
+        symbol = header.symbol.upper()
+        if symbol not in self._symbols:
+            return []
+
+        price = float(trade_update.price)
+        history = self._price_history.setdefault(
+            symbol,
+            deque(maxlen=max(self._parameters.slow_window, 50)),
+        )
+        history.append(price)
+        self._last_price[symbol] = price
+
+        if len(history) < self._parameters.slow_window:
+            # Espera acumular histórico suficiente
+            return []
+
+        params = self._parameters
+        fast_window = min(params.fast_window, len(history))
+        slow_window = min(params.slow_window, len(history))
+
+        history_list = list(history)
+        fast_avg = sum(history_list[-fast_window:]) / fast_window
+        slow_avg = sum(history_list[-slow_window:]) / slow_window
+
+        if slow_avg <= 0:
+            return []
+
+        signal_strength = (fast_avg - slow_avg) / slow_avg
+        state = self._position_state.get(symbol, "FLAT")
+        signals: List[actions_pb2.TradingSignal] = []
+
+        timestamp = Timestamp()
+        timestamp.GetCurrentTime()
+
+        # Condições de entrada (compra)
+        if state != "LONG" and signal_strength > params.min_signal_strength:
+            log.info(
+                "[%s] BUY sinal %s | fast %.2f slow %.2f strength %.4f",
+                self.strategy_id,
+                symbol,
+                fast_avg,
+                slow_avg,
+                signal_strength,
+            )
+            signals.append(
+                actions_pb2.TradingSignal(
+                    strategy_id=self.strategy_id,
+                    symbol=symbol,
+                    side="BUY",
+                    confidence=min(0.99, 0.5 + abs(signal_strength) * 10),
+                    signal_timestamp=timestamp,
+                    mode=self.mode,
+                )
+            )
+            self._position_state[symbol] = "LONG"
+            self._entry_price[symbol] = price
+            return signals
+
+        if state == "LONG":
+            entry_price = self._entry_price.get(symbol, price)
+            unrealized = (
+                (price - entry_price) / entry_price if entry_price else 0.0
+            )
+
+            exit_reasons: list[str] = []
+            if unrealized >= params.take_profit:
+                exit_reasons.append("take_profit")
+            if unrealized <= -params.stop_loss:
+                exit_reasons.append("stop_loss")
+            if signal_strength < -params.min_signal_strength:
+                exit_reasons.append("trend_reversal")
+
+            if exit_reasons:
+                log.info(
+                    "[%s] SELL sinal %s | motivos=%s gain=%.4f",
+                    self.strategy_id,
+                    symbol,
+                    ",".join(exit_reasons),
+                    unrealized,
+                )
+                signals.append(
+                    actions_pb2.TradingSignal(
+                        strategy_id=self.strategy_id,
+                        symbol=symbol,
+                        side="SELL",
+                        confidence=min(0.99, 0.6 + abs(unrealized) * 12),
+                        signal_timestamp=timestamp,
+                        mode=self.mode,
+                    )
+                )
+                self._position_state[symbol] = "FLAT"
+                self._entry_price.pop(symbol, None)
+
+        return signals
+
+    # ------------------------------------------------------------------
+    # Introspection helpers (useful for the dashboard)
+    # ------------------------------------------------------------------
+    def snapshot(self) -> dict:
+        return {
+            "strategy_id": self.strategy_id,
+            "symbols": sorted(self._symbols),
+            "parameters": self._parameters.__dict__,
+            "cash_balance": self._cash_balance,
+            "positions": self._position_state.copy(),
+            "entry_prices": self._entry_price.copy(),
+        }

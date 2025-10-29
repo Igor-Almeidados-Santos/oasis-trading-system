@@ -538,34 +538,64 @@ const [commandHistory, setCommandHistory] = useState<CommandHistoryRecord[]>([])
   }, [strategiesList, strategyOverrides, selectedStrategy]);
   const hasStrategies = displayStrategies.length > 0;
 
-  const summary = useMemo(() => {
-    const positions = Array.isArray(portfolio.positions)
-      ? portfolio.positions
-      : [];
-    const ops = Array.isArray(operations) ? operations : [];
-    const real = positions.filter((p) => p.mode === "REAL").length;
-    const paper = positions.filter((p) => p.mode === "PAPER").length;
-    const total = positions.length;
-    const cashPaper = parseUsdNumeric(portfolio.cash?.PAPER);
-    const cashReal = parseUsdNumeric(portfolio.cash?.REAL);
-    const totalCash = cashPaper + cashReal;
-    const lastOperation = ops[0]?.executed_at
-      ? new Date(ops[0].executed_at).toLocaleString()
-      : "—";
+  const realOperations = useMemo(
+    () =>
+      Array.isArray(operations)
+        ? operations.filter((op) => op.mode === "REAL")
+        : [],
+    [operations]
+  );
+  const paperOperations = useMemo(
+    () =>
+      Array.isArray(operations)
+        ? operations.filter((op) => op.mode === "PAPER")
+        : [],
+    [operations]
+  );
+  const realHistoricalOperations = useMemo(
+    () =>
+      Array.isArray(historicalOperations)
+        ? historicalOperations.filter((op) => op.mode === "REAL")
+        : [],
+    [historicalOperations]
+  );
+  const paperHistoricalOperations = useMemo(
+    () =>
+      Array.isArray(historicalOperations)
+        ? historicalOperations.filter((op) => op.mode === "PAPER")
+        : [],
+    [historicalOperations]
+  );
+  const realPositions = useMemo(
+    () =>
+      Array.isArray(portfolio.positions)
+        ? portfolio.positions.filter((pos) => pos.mode === "REAL")
+        : [],
+    [portfolio.positions]
+  );
+  const paperPositions = useMemo(
+    () =>
+      Array.isArray(portfolio.positions)
+        ? portfolio.positions.filter((pos) => pos.mode === "PAPER")
+        : [],
+    [portfolio.positions]
+  );
+  const realCashBalance = parseUsdNumeric(portfolio.cash?.REAL ?? null);
 
+  const summary = useMemo(() => {
+    const lastOperation = realOperations[0]?.executed_at
+      ? new Date(realOperations[0].executed_at as string).toLocaleString()
+      : "—";
     return {
-      real,
-      paper,
-      total,
-      cashPaper,
-      cashReal,
-      totalCash,
+      totalPositions: realPositions.length,
+      totalOperations: realOperations.length,
+      realCash: realCashBalance ?? 0,
       lastOperation,
       botStatus: controlState?.bot_status ?? "—",
       activeStrategies: strategiesList.filter((s) => s.enabled).length,
       totalStrategies: strategiesList.length,
     };
-  }, [portfolio, operations, controlState, strategiesList]);
+  }, [realPositions, realOperations, realCashBalance, controlState, strategiesList]);
 
 const botStatusNormalized = (controlState?.bot_status ?? "").toUpperCase();
 const isBotRunning = botStatusNormalized === "RUNNING";
@@ -602,14 +632,12 @@ const selectedStrategyDetails = useMemo(() => {
 
   const dashboardPortfolioProps = useMemo(
     () => ({
-      positions: Array.isArray(portfolio.positions)
-        ? portfolio.positions
-        : [],
-      cash: portfolio.cash,
+      positions: realPositions,
+      cash: { REAL: portfolio.cash?.REAL ?? "0", PAPER: "0" },
       loading,
       error: portfolioError,
     }),
-    [portfolio, loading, portfolioError]
+    [realPositions, portfolio.cash, loading, portfolioError]
   );
 
   const dashboardStrategiesProps = useMemo(
@@ -624,11 +652,11 @@ const selectedStrategyDetails = useMemo(() => {
 
   const dashboardOperationsProps = useMemo(
     () => ({
-      operations,
+      operations: realOperations,
       loading: operationsLoading,
       error: operationsError,
     }),
-    [operations, operationsLoading, operationsError]
+    [realOperations, operationsLoading, operationsError]
   );
 
   const processOperations = useCallback(
@@ -689,13 +717,13 @@ const selectedStrategyDetails = useMemo(() => {
   );
 
   const processedRecentOperations = useMemo(
-    () => processOperations(operations),
-    [operations, processOperations]
+    () => processOperations(realOperations),
+    [realOperations, processOperations]
   );
 
   const processedHistoricalOperations = useMemo(
-    () => processOperations(historicalOperations),
-    [historicalOperations, processOperations]
+    () => processOperations(realHistoricalOperations),
+    [realHistoricalOperations, processOperations]
   );
 
   const insightsDataset =
@@ -717,8 +745,8 @@ const selectedStrategyDetails = useMemo(() => {
     const pending = dataset.filter((op) =>
       ["PENDING", "NEW", "OPEN"].includes((op.status || "").toUpperCase())
     ).length;
-    const realOps = dataset.filter((op) => op.mode === "REAL").length;
-    const paperOps = dataset.filter((op) => op.mode === "PAPER").length;
+    const buyCount = dataset.filter((op) => (op.side || "").toUpperCase() === "BUY").length;
+    const sellCount = dataset.filter((op) => (op.side || "").toUpperCase() === "SELL").length;
 
     const fillRate = total > 0 ? Math.round((filled / total) * 100) : 0;
 
@@ -728,8 +756,8 @@ const selectedStrategyDetails = useMemo(() => {
       rejected,
       pending,
       fillRate,
-      realOps,
-      paperOps,
+      buyCount,
+      sellCount,
     };
   }, [insightsDataset]);
 
@@ -741,8 +769,8 @@ const selectedStrategyDetails = useMemo(() => {
     return values;
   }, [insightsDataset]);
 
-  const hasRecentBase = Array.isArray(operations) && operations.length > 0;
-  const hasHistoricalBase = Array.isArray(historicalOperations) && historicalOperations.length > 0;
+  const hasRecentBase = realOperations.length > 0;
+  const hasHistoricalBase = realHistoricalOperations.length > 0;
 
   const sparklineStats = useMemo(() => {
     if (sparklineData.length === 0) {
@@ -1269,27 +1297,27 @@ const selectedStrategyDetails = useMemo(() => {
 
             <section className="grid gap-4 border border-slate-200 bg-white p-6 shadow-sm dark:border-slate-700 dark:bg-slate-800 sm:grid-cols-2 lg:grid-cols-4">
               <SummaryCard
-                title="Posições ativas"
-                value={summary.total.toString()}
-                description={`${summary.real} REAL · ${summary.paper} PAPER`}
+                title="Posições (REAL)"
+                value={summary.totalPositions.toString()}
+                description="Ativos monitorizados em tempo real"
                 accent="from-emerald-400 to-emerald-500"
               />
               <SummaryCard
-                title="Caixa disponível"
-                value={formatUsd(summary.totalCash)}
-                description={`Paper ${formatUsd(summary.cashPaper)} · Real ${formatUsd(summary.cashReal)}`}
+                title="Operações (REAL)"
+                value={summary.totalOperations.toString()}
+                description="Ordens aprovadas nas leituras recentes"
                 accent="from-sky-400 to-sky-500"
+              />
+              <SummaryCard
+                title="Caixa (REAL)"
+                value={formatUsd(summary.realCash)}
+                description="Saldo disponível para execução real"
+                accent="from-indigo-400 to-indigo-500"
               />
               <SummaryCard
                 title="Estado do Bot"
                 value={summary.botStatus}
                 description={`Última operação: ${summary.lastOperation}`}
-                accent="from-indigo-400 to-indigo-500"
-              />
-              <SummaryCard
-                title="Estratégias ativas"
-                value={`${summary.activeStrategies}/${summary.totalStrategies}`}
-                description="Geridas via Control Center"
                 accent="from-amber-400 to-amber-500"
               />
             </section>
@@ -1336,31 +1364,20 @@ const selectedStrategyDetails = useMemo(() => {
               <div className="space-y-4">
                 <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-700 dark:bg-slate-800">
                   <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-                    Distribuição por modo
+                    Distribuição por lado
                   </h3>
                   <div className="mt-4 space-y-2">
                     <InsightDistribution
-                      label="Paper"
-                      count={operationsInsights.paperOps}
-                      total={operationsInsights.total}
-                      tone="amber"
-                    />
-                    <InsightDistribution
-                      label="Real"
-                      count={operationsInsights.realOps}
+                      label="Compras"
+                      count={operationsInsights.buyCount}
                       total={operationsInsights.total}
                       tone="emerald"
                     />
                     <InsightDistribution
-                      label="Outros"
-                      count={Math.max(
-                        0,
-                        operationsInsights.total -
-                          operationsInsights.paperOps -
-                          operationsInsights.realOps
-                      )}
+                      label="Vendas"
+                      count={operationsInsights.sellCount}
                       total={operationsInsights.total}
-                      tone="indigo"
+                      tone="rose"
                     />
                   </div>
                 </div>
@@ -1416,14 +1433,14 @@ const selectedStrategyDetails = useMemo(() => {
                   <ErrorState message={portfolioError} />
                 ) : controlError ? (
                   <ErrorState message={controlError} />
-                ) : portfolio.positions.length === 0 ? (
+                ) : realPositions.length === 0 ? (
                   <EmptyState
                     message="Nenhuma posição registada no momento."
                     darkMode={darkMode}
                   />
                 ) : (
                   <div className="mt-6 space-y-4">
-                    {portfolio.positions.map((pos) => (
+                    {realPositions.map((pos) => (
                       <div
                         key={`${pos.mode}-${pos.symbol}`}
                         className="flex items-center justify-between border border-slate-200 bg-white px-4 py-3 shadow-sm transition dark:border-slate-700 dark:bg-slate-800/60"
@@ -1793,7 +1810,7 @@ const selectedStrategyDetails = useMemo(() => {
                 />
                 <ControlCard
                   title="Alertas"
-                  value={(Array.isArray(operations) ? operations.length : 0).toString()}
+                  value={realOperations.length.toString()}
                   description="Operações processadas nas últimas leituras."
                   accent="bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
                 />
@@ -1896,6 +1913,16 @@ const selectedStrategyDetails = useMemo(() => {
                 {activeView === "simulations" && (
                   <SimulationsSection
                     strategy={advancedStrategy}
+                    paperState={{
+                      cash: portfolio.cash?.PAPER ?? null,
+                      positions: paperPositions,
+                      recentOperations: paperOperations,
+                      historicalOperations: paperHistoricalOperations,
+                      operationsLoading,
+                      operationsError,
+                      historicalLoading,
+                      historicalError,
+                    }}
                     loading={loading}
                     error={simulationsError}
                     onSubmit={handleSimulationsSubmit}

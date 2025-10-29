@@ -27,10 +27,57 @@ import (
 
 // --- Constantes ---
 const (
-	controlCommandTopic     = "control.commands"
-	botStatusKey            = "control:bot_status"
-	strategyConfigKeyPrefix = "control:strategy:"
+	defaultControlCommandTopic = "control.commands"
+	botStatusKey               = "control:bot_status"
+	strategyConfigKeyPrefix    = "control:strategy:"
 )
+
+func ensureKafkaTopic(brokers []string, topic string) error {
+	if len(brokers) == 0 {
+		return errors.New("nenhum broker Kafka configurado")
+	}
+
+	conn, err := kafka.Dial("tcp", brokers[0])
+	if err != nil {
+		return fmt.Errorf("falha ao conectar ao broker %s: %w", brokers[0], err)
+	}
+	defer conn.Close()
+
+	if err := conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		return fmt.Errorf("falha ao definir deadline para conexão Kafka: %w", err)
+	}
+
+	controller, err := conn.Controller()
+	if err != nil {
+		return fmt.Errorf("falha ao obter controller do cluster: %w", err)
+	}
+
+	controllerAddr := net.JoinHostPort(controller.Host, strconv.Itoa(int(controller.Port)))
+	controllerConn, err := kafka.Dial("tcp", controllerAddr)
+	if err != nil {
+		return fmt.Errorf("falha ao conectar ao controller %s: %w", controllerAddr, err)
+	}
+	defer controllerConn.Close()
+
+	if err := controllerConn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		return fmt.Errorf("falha ao definir deadline para controller Kafka: %w", err)
+	}
+
+	topicConfigs := []kafka.TopicConfig{{
+		Topic:             topic,
+		NumPartitions:     1,
+		ReplicationFactor: 1,
+	}}
+
+	if err := controllerConn.CreateTopics(topicConfigs...); err != nil {
+		if strings.Contains(err.Error(), "already exists") || strings.Contains(err.Error(), "Topic exists") {
+			return nil
+		}
+		return fmt.Errorf("falha ao criar tópico %s: %w", topic, err)
+	}
+
+	return nil
+}
 
 // --- Estruturas de Dados ---
 
@@ -353,13 +400,25 @@ func main() {
 		kafkaBrokers = "localhost:9092"
 	}
 	brokers := strings.Split(kafkaBrokers, ",")
+
+	commandTopic := defaultControlCommandTopic
+	if envTopic := strings.TrimSpace(os.Getenv("CONTROL_COMMAND_TOPIC")); envTopic != "" {
+		commandTopic = envTopic
+	}
+
+	if err := ensureKafkaTopic(brokers, commandTopic); err != nil {
+		log.Printf("Aviso: não foi possível garantir existência do tópico Kafka '%s': %v", commandTopic, err)
+	} else {
+		log.Printf("Tópico Kafka '%s' verificado/criado com sucesso", commandTopic)
+	}
+
 	kafkaWriter := &kafka.Writer{
 		Addr:     kafka.TCP(brokers...),
-		Topic:    controlCommandTopic,
+		Topic:    commandTopic,
 		Balancer: &kafka.LeastBytes{},
 		Async:    true,
 	}
-	log.Printf("Producer Kafka configurado para tópico '%s' em %s", controlCommandTopic, kafkaBrokers)
+	log.Printf("Producer Kafka configurado para tópico '%s' em %s", commandTopic, kafkaBrokers)
 
 	handler := &ApiHandler{
 		redisClient: rdb,
@@ -542,8 +601,8 @@ func (h *ApiHandler) getOperations(c *gin.Context) {
                 o.quantity::text,
                 o.price::text,
                 o.status,
-                NULL::timestamptz AS executed_at,
-                NULL::text AS fee,
+                o.created_at AS executed_at,
+                '0'::text AS fee,
                 o.mode,
                 o.created_at AS order_ts
             FROM orders o
@@ -556,12 +615,12 @@ func (h *ApiHandler) getOperations(c *gin.Context) {
                 o.client_order_id,
                 f.symbol,
                 f.side,
-                NULL::text AS order_type,
+                o.order_type,
                 f.quantity::text,
                 f.price::text,
                 'FILLED' AS status,
                 f.executed_at,
-                f.fee::text,
+                COALESCE(f.fee::text, '0') AS fee,
                 o.mode,
                 f.executed_at AS order_ts
             FROM fills f
