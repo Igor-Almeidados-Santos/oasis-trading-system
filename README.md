@@ -196,15 +196,23 @@ npm run dev
 
 A página “Simulações” (acesso via sidebar do Control Center ou diretamente em `/simulations`) concentra tudo o que pertence ao modo paper:
 
-- **Resumo paper**: saldo disponível, número de posições simuladas, volume de operações recentes e taxa de fills.
+- **Resumo paper**: saldo disponível (com gráfico de desempenho do caixa), número de posições simuladas, volume de operações recentes e taxa de fills.
 - **Listagens dedicadas**: posições e operações paper são filtradas automaticamente e podem ser revisadas sem misturar dados reais.
 - **Histórico paper**: tabela paginada com até 20 registos recentes (modo PAPER). Utilize a API (`/api/v1/operations?mode=PAPER`) para consultas completas.
 - **Configuração no modal**: um ícone de engrenagem abre um pop-up persistente para ajustar a estratégia simulada (capital, símbolos, janelas, take profit, etc.). As alterações são enviadas via `SET_STRATEGY_CONFIG`.
+- **Reset rápido**: o botão “Zerar ambiente paper” apaga posições `position:paper:*`, reinicia `wallet:paper:USD` em `0` e limpa o histórico de caixa.
+- **Estratégias desativadas por padrão**: sempre que os serviços são iniciados, todas as estratégias permanecem desativadas; habilite-as manualmente pelo dashboard após revisar a configuração.
 
 ### Estratégia de exemplo (`advanced-alpha-001`)
 - Ativada por padrão em modo PAPER e exposta na UI.
 - Campos suportados no modal correspondem às chaves do `StrategyConfigUpdatePayload` (ex.: `usd_balance`, `symbols`, `fast_window`).
 - O Control Center sincroniza automaticamente o estado atual antes de abrir o modal; caso prefira script, use `POST /api/v1/strategies/advanced-alpha-001/toggle`.
+
+### Simulador rápido (`test-simulator-001`)
+- Focado em demos: alterna ordens BUY/SELL a cada poucos segundos utilizando o saldo fictício definido no dashboard.
+- O saldo paper é debitado a cada compra e creditado a cada venda, permitindo acompanhar o lucro/prejuízo acumulado diretamente no gráfico.
+- Utilize o novo cartão **Simulador rápido de ordens** na página de Simulações para ajustar `usd_balance`, percentagem de posição e ritmo (via `fast_window`).
+- Ideal para validar rapidamente o fluxo completo (Strategy Framework → Risk Engine → Order Manager → Dashboard) com dados reais ou sintéticos.
 
 ### Reproduzindo dados paper
 1. Replique o saldo inicial e símbolos no modal de Simulações.

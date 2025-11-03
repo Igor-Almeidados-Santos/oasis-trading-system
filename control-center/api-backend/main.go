@@ -103,8 +103,9 @@ type Operation struct {
 }
 
 type PortfolioResponse struct {
-	Cash      map[string]string `json:"cash"`
-	Positions []Position        `json:"positions"`
+	Cash        map[string]string `json:"cash"`
+	Positions   []Position        `json:"positions"`
+	CashHistory []CashSnapshot    `json:"cash_history,omitempty"`
 }
 
 type LoginRequest struct {
@@ -133,6 +134,28 @@ type StrategyConfig struct {
 	SlowWindow      int      `json:"slow_window,omitempty"`
 	MinSignalBps    int      `json:"min_signal_bps,omitempty"`
 	PositionSizePct float64  `json:"position_size_pct,omitempty"`
+	CooldownSeconds float64  `json:"cooldown_seconds,omitempty"`
+	BatchSize       int      `json:"batch_size,omitempty"`
+	BatchIntervalM  float64  `json:"batch_interval_minutes,omitempty"`
+	Fields          []StrategyField `json:"fields,omitempty"`
+}
+
+type StrategyField struct {
+	Key     string   `json:"key"`
+	Label   string   `json:"label"`
+	Type    string   `json:"type"`
+	Helper  string   `json:"helper,omitempty"`
+	Options []string `json:"options,omitempty"`
+}
+
+type CashSnapshot struct {
+	Mode          string    `json:"mode"`
+	Balance       string    `json:"balance"`
+	Delta         string    `json:"delta,omitempty"`
+	Symbol        string    `json:"symbol,omitempty"`
+	Side          string    `json:"side,omitempty"`
+	ClientOrderID string    `json:"client_order_id,omitempty"`
+	Timestamp     time.Time `json:"timestamp"`
 }
 
 type StrategyConfigRequest struct {
@@ -146,21 +169,23 @@ type StrategyConfigRequest struct {
 	SlowWindow      *int     `json:"slow_window"`
 	MinSignalBps    *int     `json:"min_signal_bps"`
 	PositionSizePct *float64 `json:"position_size_pct"`
+	CooldownSeconds *float64 `json:"cooldown_seconds"`
+	BatchSize       *int     `json:"batch_size"`
+	BatchIntervalM  *float64 `json:"batch_interval_minutes"`
 }
 
 var defaultStrategyConfigs = map[string]StrategyConfig{
 	"momentum-001": {
 		StrategyID: "momentum-001",
-		Enabled:    true,
+		Enabled:    false,
 		Mode:       "PAPER",
-		Symbols:    []string{"BTC-USD"},
 	},
 	"advanced-alpha-001": {
 		StrategyID:      "advanced-alpha-001",
-		Enabled:         true,
+		Enabled:         false,
 		Mode:            "PAPER",
 		Symbols:         []string{"BTC-USD", "ETH-USD", "SOL-USD"},
-		UsdBalance:      "25000",
+		UsdBalance:      "0",
 		TakeProfitBps:   120,
 		StopLossBps:     60,
 		FastWindow:      5,
@@ -168,12 +193,57 @@ var defaultStrategyConfigs = map[string]StrategyConfig{
 		MinSignalBps:    20,
 		PositionSizePct: 0.15,
 	},
+	"test-simulator-001": {
+		StrategyID:      "test-simulator-001",
+		Enabled:         false,
+		Mode:            "PAPER",
+		Symbols:         []string{"BTC-USD"},
+		UsdBalance:      "0",
+		PositionSizePct: 0.5,
+		CooldownSeconds: 2,
+		BatchSize:       10,
+		BatchIntervalM:  10,
+	},
+}
+
+var strategyFieldDefinitions = map[string][]StrategyField{
+	"momentum-001": {
+		{Key: "enabled", Label: "Ativar estratégia", Type: "boolean"},
+		{Key: "mode", Label: "Modo", Type: "mode"},
+		{Key: "symbols", Label: "Ativos a monitorizar", Type: "symbol-list"},
+		{Key: "usd_balance", Label: "Saldo fictício (USD)", Type: "currency"},
+	},
+	"advanced-alpha-001": {
+		{Key: "enabled", Label: "Ativar estratégia", Type: "boolean"},
+		{Key: "mode", Label: "Modo", Type: "mode"},
+		{Key: "symbols", Label: "Ativos", Type: "symbol-list"},
+		{Key: "usd_balance", Label: "Saldo fictício (USD)", Type: "currency"},
+		{Key: "take_profit_bps", Label: "Take profit (bps)", Type: "integer", Helper: "Ex.: 120 = 1.20%"},
+		{Key: "stop_loss_bps", Label: "Stop loss (bps)", Type: "integer", Helper: "Ex.: 60 = 0.60%"},
+		{Key: "fast_window", Label: "Janela rápida", Type: "integer"},
+		{Key: "slow_window", Label: "Janela lenta", Type: "integer"},
+		{Key: "min_signal_bps", Label: "Sinal mínimo (bps)", Type: "integer"},
+		{Key: "position_size_pct", Label: "% capital por posição", Type: "percent"},
+	},
+	"test-simulator-001": {
+		{Key: "enabled", Label: "Ativar simulador", Type: "boolean"},
+		{Key: "mode", Label: "Modo", Type: "mode"},
+		{Key: "symbols", Label: "Ativos", Type: "symbol-list"},
+		{Key: "usd_balance", Label: "Saldo fictício (USD)", Type: "currency"},
+		{Key: "position_size_pct", Label: "% capital por lote", Type: "percent"},
+		{Key: "cooldown_seconds", Label: "Intervalo entre ordens (s)", Type: "integer"},
+		{Key: "batch_size", Label: "Quantidade por ciclo", Type: "integer"},
+		{Key: "batch_interval_minutes", Label: "Intervalo entre ciclos (min)", Type: "integer"},
+	},
 }
 
 func cloneStrategyConfig(cfg StrategyConfig) StrategyConfig {
 	clone := cfg
 	if cfg.Symbols != nil {
 		clone.Symbols = append([]string(nil), cfg.Symbols...)
+	}
+	if cfg.Fields != nil {
+		clone.Fields = append([]StrategyField(nil), cfg.Fields...)
 	}
 	return clone
 }
@@ -228,6 +298,18 @@ func applyDefaults(base, candidate StrategyConfig) StrategyConfig {
 	if cfg.PositionSizePct == 0 && base.PositionSizePct != 0 {
 		cfg.PositionSizePct = base.PositionSizePct
 	}
+	if cfg.CooldownSeconds <= 0 && base.CooldownSeconds > 0 {
+		cfg.CooldownSeconds = base.CooldownSeconds
+	}
+	if cfg.BatchSize == 0 && base.BatchSize != 0 {
+		cfg.BatchSize = base.BatchSize
+	}
+	if cfg.BatchIntervalM <= 0 && base.BatchIntervalM > 0 {
+		cfg.BatchIntervalM = base.BatchIntervalM
+	}
+	if len(cfg.Fields) == 0 {
+		cfg.Fields = append([]StrategyField(nil), base.Fields...)
+	}
 	return cfg
 }
 
@@ -236,11 +318,14 @@ func (h *ApiHandler) loadStrategyConfig(ctx context.Context, strategyID string) 
 	if !ok {
 		base = StrategyConfig{
 			StrategyID: strategyID,
-			Enabled:    true,
+			Enabled:    false,
 			Mode:       "PAPER",
 		}
 	}
 	cfg := cloneStrategyConfig(base)
+	if defs, ok := strategyFieldDefinitions[strategyID]; ok {
+		cfg.Fields = append([]StrategyField(nil), defs...)
+	}
 
 	stateKey := fmt.Sprintf("%s%s", strategyConfigKeyPrefix, strings.ToLower(strategyID))
 	val, err := h.redisClient.Get(ctx, stateKey).Result()
@@ -258,11 +343,16 @@ func (h *ApiHandler) loadStrategyConfig(ctx context.Context, strategyID string) 
 		return cfg
 	}
 
-	return applyDefaults(cfg, stored)
+	result := applyDefaults(cfg, stored)
+	if defs, ok := strategyFieldDefinitions[strategyID]; ok {
+		result.Fields = append([]StrategyField(nil), defs...)
+	}
+	return result
 }
 
 func (h *ApiHandler) saveStrategyConfig(ctx context.Context, cfg StrategyConfig) {
 	cfg.Symbols = normalizeSymbols(cfg.Symbols)
+	cfg.Fields = nil
 	stateKey := fmt.Sprintf("%s%s", strategyConfigKeyPrefix, strings.ToLower(cfg.StrategyID))
 	payload, err := json.Marshal(cfg)
 	if err != nil {
@@ -490,6 +580,7 @@ func main() {
 		apiV1.GET("/control/state", handler.getControlState)
 		apiV1.POST("/bot/status", handler.setBotStatus)
 		apiV1.POST("/strategies/:strategy_id/toggle", handler.setStrategyConfig)
+		apiV1.POST("/paper/reset", handler.resetPaperEnvironment)
 	}
 
 	port := os.Getenv("CONTROL_CENTER_API_PORT")
@@ -568,16 +659,75 @@ func (h *ApiHandler) getPortfolio(c *gin.Context) {
 	}
 
 	if _, ok := cashBalances["PAPER"]; !ok {
-		advanced := h.loadStrategyConfig(ctx, "advanced-alpha-001")
-		if advanced.UsdBalance != "" {
-			cashBalances["PAPER"] = advanced.UsdBalance
+		fallback := "0"
+		if advanced := h.loadStrategyConfig(ctx, "advanced-alpha-001"); advanced.UsdBalance != "" {
+			fallback = advanced.UsdBalance
+		} else if test := h.loadStrategyConfig(ctx, "test-simulator-001"); test.UsdBalance != "" {
+			fallback = test.UsdBalance
 		}
+		cashBalances["PAPER"] = fallback
+	}
+
+	var cashHistory []CashSnapshot
+	if entries, err := h.redisClient.LRange(ctx, "wallet:paper:history", 0, 200).Result(); err == nil {
+		for i := len(entries) - 1; i >= 0; i-- {
+			entry := entries[i]
+			var snap CashSnapshot
+			if err := json.Unmarshal([]byte(entry), &snap); err != nil {
+				log.Printf("Aviso: não foi possível interpretar histórico de caixa: %v", err)
+				continue
+			}
+			cashHistory = append(cashHistory, snap)
+		}
+	} else if err != redis.Nil {
+		log.Printf("Aviso: falha ao ler histórico de caixa: %v", err)
 	}
 
 	c.JSON(http.StatusOK, PortfolioResponse{
-		Cash:      cashBalances,
-		Positions: positions,
+		Cash:        cashBalances,
+		Positions:   positions,
+		CashHistory: cashHistory,
 	})
+}
+
+func (h *ApiHandler) resetPaperEnvironment(c *gin.Context) {
+	ctx := context.Background()
+
+	var keysToDelete []string
+	iter := h.redisClient.Scan(ctx, 0, "position:paper:*", 0).Iterator()
+	for iter.Next(ctx) {
+		keysToDelete = append(keysToDelete, iter.Val())
+	}
+	if err := iter.Err(); err != nil {
+		log.Printf("Erro ao listar posições paper: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Falha ao limpar posições paper"})
+		return
+	}
+
+	if len(keysToDelete) > 0 {
+		if err := h.redisClient.Del(ctx, keysToDelete...).Err(); err != nil {
+			log.Printf("Erro ao remover posições paper: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Falha ao remover posições paper"})
+			return
+		}
+	}
+
+	_, err := h.redisClient.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+		if err := pipe.Del(ctx, "wallet:paper:USD").Err(); err != nil && err != redis.Nil {
+			return err
+		}
+		if err := pipe.Del(ctx, "wallet:paper:history").Err(); err != nil && err != redis.Nil {
+			return err
+		}
+		return pipe.Set(ctx, "wallet:paper:USD", "0", 0).Err()
+	})
+	if err != nil {
+		log.Printf("Erro ao reinicializar saldo paper: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Falha ao reinicializar saldo paper"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Ambiente paper reinicializado"})
 }
 
 func (h *ApiHandler) getOperations(c *gin.Context) {
@@ -738,7 +888,10 @@ func (h *ApiHandler) setStrategyConfig(c *gin.Context) {
 		req.FastWindow == nil &&
 		req.SlowWindow == nil &&
 		req.MinSignalBps == nil &&
-		req.PositionSizePct == nil {
+		req.PositionSizePct == nil &&
+		req.CooldownSeconds == nil &&
+		req.BatchSize == nil &&
+		req.BatchIntervalM == nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Pedido inválido: forneça pelo menos um campo para atualização"})
 		return
 	}
@@ -825,6 +978,30 @@ func (h *ApiHandler) setStrategyConfig(c *gin.Context) {
 		cfg.PositionSizePct = *req.PositionSizePct
 	}
 
+	if req.CooldownSeconds != nil {
+		if *req.CooldownSeconds < 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "cooldown_seconds deve ser >= 0"})
+			return
+		}
+		cfg.CooldownSeconds = *req.CooldownSeconds
+	}
+
+	if req.BatchSize != nil {
+		if *req.BatchSize <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "batch_size deve ser > 0"})
+			return
+		}
+		cfg.BatchSize = *req.BatchSize
+	}
+
+	if req.BatchIntervalM != nil {
+		if *req.BatchIntervalM < 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "batch_interval_minutes deve ser >= 0"})
+			return
+		}
+		cfg.BatchIntervalM = *req.BatchIntervalM
+	}
+
 	command := ControlCommand{
 		Command: "SET_STRATEGY_CONFIG",
 		Payload: cfg,
@@ -898,12 +1075,16 @@ func (h *ApiHandler) getControlState(c *gin.Context) {
 		if !ok {
 			base = StrategyConfig{
 				StrategyID: strategyID,
-				Enabled:    true,
+				Enabled:    false,
 				Mode:       "PAPER",
 			}
 		}
 		payload.StrategyID = strategyID
-		strategyMap[strategyID] = applyDefaults(base, payload)
+		cfg := applyDefaults(base, payload)
+		if defs, ok := strategyFieldDefinitions[strategyID]; ok {
+			cfg.Fields = append([]StrategyField(nil), defs...)
+		}
+		strategyMap[strategyID] = cfg
 	}
 	if err := iter.Err(); err != nil {
 		log.Printf("Erro ao iterar configs de estratégias: %v", err)
@@ -912,7 +1093,11 @@ func (h *ApiHandler) getControlState(c *gin.Context) {
 	// Inclui defaults para estratégias conhecidas não configuradas
 	for strategyID, cfg := range defaultStrategyConfigs {
 		if _, ok := strategyMap[strategyID]; !ok {
-			strategyMap[strategyID] = cloneStrategyConfig(cfg)
+			clone := cloneStrategyConfig(cfg)
+			if defs, ok := strategyFieldDefinitions[strategyID]; ok {
+				clone.Fields = append([]StrategyField(nil), defs...)
+			}
+			strategyMap[strategyID] = clone
 		}
 	}
 

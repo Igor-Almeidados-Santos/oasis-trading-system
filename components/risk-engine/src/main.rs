@@ -1,10 +1,12 @@
 use bigdecimal::BigDecimal;
+use chrono::Utc;
 use contracts::{
     order_executor_client::OrderExecutorClient,
     risk_validator_server::{RiskValidator, RiskValidatorServer},
     OrderRequest, SignalValidationResponse, TradingSignal,
 };
 use redis::AsyncCommands; // <-- NOVO
+use serde_json::json;
 use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::env;
@@ -51,6 +53,7 @@ pub struct RiskValidatorService {
     order_manager_client: OrderExecutorClient<Channel>,
     redis_client: Option<Arc<Mutex<redis::aio::MultiplexedConnection>>>,
     positions: Arc<Mutex<HashMap<String, Position>>>,
+    cash_balances: Arc<Mutex<HashMap<String, BigDecimal>>>,
 }
 
 #[tonic::async_trait]
@@ -153,6 +156,11 @@ impl RiskValidator for RiskValidatorService {
                     map.insert(position_key.clone(), position.clone());
                 }
 
+                if signal_mode == contracts::TradingMode::Paper {
+                    self.adjust_cash_balance(&signal.side, &order_request, &price, &qty)
+                        .await;
+                }
+
                 Ok(Response::new(SignalValidationResponse {
                     approved: true,
                     reason: "OK".to_string(),
@@ -166,6 +174,64 @@ impl RiskValidator for RiskValidatorService {
                     reason: format!("Falha na execução: {}", e.message()),
                     order_request: None,
                 }))
+            }
+        }
+    }
+}
+
+impl RiskValidatorService {
+    async fn adjust_cash_balance(
+        &self,
+        side: &str,
+        order_request: &OrderRequest,
+        price: &BigDecimal,
+        qty: &BigDecimal,
+    ) {
+        let notional = (price * qty).abs();
+        let delta = if side.eq_ignore_ascii_case("BUY") {
+            -notional.clone()
+        } else {
+            notional.clone()
+        };
+        let wallet_key = "wallet:paper:USD";
+        let history_key = "wallet:paper:history";
+        if let Some(ref rc) = self.redis_client {
+            let mut conn = rc.lock().await;
+            let current_raw: String = conn.get(wallet_key).await.unwrap_or_else(|_| "0".into());
+            let mut current_balance =
+                BigDecimal::from_str(&current_raw).unwrap_or_else(|_| BigDecimal::from(0));
+            current_balance += &delta;
+            if current_balance < BigDecimal::from(0) {
+                current_balance = BigDecimal::from(0);
+            }
+            let balance_str = current_balance.to_string();
+            if let Err(err) = conn.set::<_, _, ()>(wallet_key, &balance_str).await {
+                warn!(error = %err, "Falha ao atualizar saldo paper no Redis");
+            }
+            let snapshot = json!({
+                "timestamp": Utc::now().to_rfc3339(),
+                "mode": "PAPER",
+                "balance": balance_str,
+                "delta": delta.to_string(),
+                "symbol": order_request.symbol,
+                "side": order_request.side,
+                "client_order_id": order_request.client_order_id,
+            });
+            if let Err(err) = conn
+                .lpush::<_, _, ()>(history_key, snapshot.to_string())
+                .await
+            {
+                warn!(error = %err, "Falha ao registar histórico de saldo paper");
+            }
+            let _: Result<(), _> = conn.ltrim(history_key, 0, 199).await;
+        } else {
+            let mut balances = self.cash_balances.lock().await;
+            let mut current_balance = balances
+                .entry("PAPER".into())
+                .or_insert_with(|| BigDecimal::from(0));
+            *current_balance += delta;
+            if *current_balance < BigDecimal::from(0) {
+                *current_balance = BigDecimal::from(0);
             }
         }
     }
@@ -212,12 +278,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
     let positions: Arc<Mutex<HashMap<String, Position>>> = Default::default();
+    let cash_balances: Arc<Mutex<HashMap<String, BigDecimal>>> = Default::default();
 
     // Injeta dependências no nosso serviço
     let validator_service = RiskValidatorService {
         order_manager_client,
         redis_client: redis_opt,
         positions,
+        cash_balances,
     };
 
     info!("Servidor RiskEngine a ouvir em {}", addr);

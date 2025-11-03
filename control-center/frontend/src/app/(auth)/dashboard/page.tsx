@@ -5,8 +5,11 @@ import { MetricsSection } from "../../../components/dashboard/MetricsSection";
 import { OperationsSection } from "../../../components/dashboard/OperationsSection";
 import { PortfolioSection } from "../../../components/dashboard/PortfolioSection";
 import { SettingsSection } from "../../../components/dashboard/SettingsSection";
-import { SimulationsSection } from "../../../components/dashboard/SimulationsSection";
 import { StrategiesSection } from "../../../components/dashboard/StrategiesSection";
+import {
+  SimulationWorkspace,
+  type PaperSimulationSnapshot,
+} from "../../../components/simulations/SimulationWorkspace";
 import type {
   ControlState,
   Operation,
@@ -16,7 +19,10 @@ import type {
 } from "../../../lib/types";
 import {
   fetchControlState,
+  fetchOperations,
+  fetchPortfolio,
   normalizePortfolioSnapshot,
+  resetPaperEnvironment,
   setBotStatus,
   setStrategyConfig,
 } from "../../../lib/api";
@@ -31,8 +37,8 @@ type DashboardView =
   | "strategies"
   | "portfolio"
   | "operations"
-  | "metrics"
   | "simulations"
+  | "metrics"
   | "settings";
 
 type CommandHistoryRecord = {
@@ -46,7 +52,7 @@ type CommandHistoryRecord = {
   timestamp: string;
 };
 
-type SimulationUpdateResult = {
+type SimulationActionResult = {
   success: boolean;
   strategy?: StrategyState;
   errorMessage?: string;
@@ -95,10 +101,7 @@ const parseNumeric = (value?: string | null): number | null => {
   return Number.isFinite(numeric) ? numeric : null;
 };
 
-const API_BASE =
-  process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8081";
-
-const ADVANCED_STRATEGY_ID = "advanced-alpha-001";
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8081";
 
 const parseUsdNumeric = (value?: string | null): number => {
   if (!value) {
@@ -117,62 +120,31 @@ const formatUsd = (value: number) =>
     maximumFractionDigits: 2,
   }).format(value);
 
-const defaultAdvancedStrategyState = (): StrategyState => ({
-  strategy_id: ADVANCED_STRATEGY_ID,
-  enabled: true,
-  mode: "PAPER",
-  symbols: ["BTC-USD", "ETH-USD"],
-  usd_balance: "25000",
-  take_profit_bps: 120,
-  stop_loss_bps: 60,
-  fast_window: 5,
-  slow_window: 21,
-  min_signal_bps: 20,
-  position_size_pct: 0.15,
-});
-
-const mergeSimulationUpdate = (
-  base: StrategyState,
-  update: StrategyConfigUpdatePayload
-): StrategyState => {
-  const next: StrategyState = { ...base };
-  if (update.enabled !== undefined) {
-    next.enabled = update.enabled;
-  }
-  if (update.mode !== undefined) {
-    next.mode = update.mode;
-  }
-  if (update.symbols) {
-    next.symbols = [...update.symbols];
-  }
-  if (update.usd_balance !== undefined) {
-    next.usd_balance = update.usd_balance;
-  }
-  if (update.take_profit_bps !== undefined) {
-    next.take_profit_bps = update.take_profit_bps;
-  }
-  if (update.stop_loss_bps !== undefined) {
-    next.stop_loss_bps = update.stop_loss_bps;
-  }
-  if (update.fast_window !== undefined) {
-    next.fast_window = update.fast_window;
-  }
-  if (update.slow_window !== undefined) {
-    next.slow_window = update.slow_window;
-  }
-  if (update.min_signal_bps !== undefined) {
-    next.min_signal_bps = update.min_signal_bps;
-  }
-  if (update.position_size_pct !== undefined) {
-    next.position_size_pct = update.position_size_pct;
-  }
-  return next;
-};
+function mapPortfolioToPaperSnapshot(
+  portfolio: PortfolioSnapshot,
+  operations: Operation[],
+): PaperSimulationSnapshot {
+  const recent = operations.slice(0, 10);
+  return {
+    cash: portfolio.cash?.PAPER ?? null,
+    cashHistory: portfolio.cash_history ?? [],
+    positions: Array.isArray(portfolio.positions)
+      ? portfolio.positions.filter((position) => position.mode === "PAPER")
+      : [],
+    recentOperations: recent,
+    historicalOperations: operations,
+    operationsLoading: false,
+    operationsError: null,
+    historicalLoading: false,
+    historicalError: null,
+  };
+}
 
 export default function DashboardPage() {
   const [portfolio, setPortfolio] = useState<PortfolioSnapshot>({
     positions: [],
     cash: {},
+    cash_history: [],
   });
   const [operations, setOperations] = useState<Operation[]>([]);
   const [controlState, setControlState] = useState<ControlState | null>(null);
@@ -212,7 +184,11 @@ export default function DashboardPage() {
   const [operationSortKey, setOperationSortKey] = useState<OperationSortKey>("executed_at");
   const [operationSortDir, setOperationSortDir] = useState<"asc" | "desc">("desc");
   const [activeView, setActiveView] = useState<DashboardView>("dashboard");
-const [commandHistory, setCommandHistory] = useState<CommandHistoryRecord[]>([]);
+  const [commandHistory, setCommandHistory] = useState<CommandHistoryRecord[]>([]);
+  const [simulationStrategies, setSimulationStrategies] = useState<StrategyState[]>([]);
+  const [simulationControlLoading, setSimulationControlLoading] = useState(false);
+  const [simulationPaperState, setSimulationPaperState] = useState<PaperSimulationSnapshot | undefined>();
+  const [simulationPaperLoading, setSimulationPaperLoading] = useState(false);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -263,6 +239,153 @@ const [commandHistory, setCommandHistory] = useState<CommandHistoryRecord[]>([])
     localStorage.removeItem(COMMAND_HISTORY_KEY);
   }, [setCommandHistory]);
 
+  const loadSimulationControl = useCallback(async () => {
+    const token = typeof window !== "undefined" ? localStorage.getItem("accessToken") : null;
+    if (!token) {
+      setSimulationStrategies([]);
+      setSimulationControlLoading(false);
+      return;
+    }
+
+    try {
+      setSimulationControlLoading(true);
+      const control = await fetchControlState(token);
+      setSimulationStrategies(control.strategies ?? []);
+    } catch (err) {
+      console.error("Falha ao carregar estratégias para simulação", err);
+      setSimulationStrategies([]);
+    } finally {
+      setSimulationControlLoading(false);
+    }
+  }, []);
+
+  const loadSimulationPaper = useCallback(async () => {
+    const token = typeof window !== "undefined" ? localStorage.getItem("accessToken") : null;
+    if (!token) {
+      setSimulationPaperState(undefined);
+      setSimulationPaperLoading(false);
+      return;
+    }
+
+    setSimulationPaperLoading(true);
+    setSimulationPaperState((prev) => {
+      if (prev) {
+        return {
+          ...prev,
+          operationsLoading: true,
+          operationsError: null,
+          historicalLoading: true,
+          historicalError: null,
+        };
+      }
+      return {
+        operationsLoading: true,
+        operationsError: null,
+        historicalLoading: true,
+        historicalError: null,
+      };
+    });
+    try {
+      const [portfolioSnapshot, operationsSnapshot] = await Promise.all([
+        fetchPortfolio(token),
+        fetchOperations(token, { limit: 40, mode: "PAPER" }),
+      ]);
+      setSimulationPaperState({
+        ...mapPortfolioToPaperSnapshot(portfolioSnapshot, operationsSnapshot),
+        operationsLoading: false,
+        operationsError: null,
+        historicalLoading: false,
+        historicalError: null,
+      });
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Falha ao carregar métricas do ambiente paper.";
+      console.error("Falha ao carregar métricas paper", err);
+      setSimulationPaperState((prev) => {
+        if (!prev) {
+          return {
+            operationsLoading: false,
+            operationsError: message,
+            historicalLoading: false,
+            historicalError: message,
+          };
+        }
+        return {
+          ...prev,
+          operationsLoading: false,
+          operationsError: message,
+          historicalLoading: false,
+          historicalError: message,
+        };
+      });
+    } finally {
+      setSimulationPaperLoading(false);
+    }
+  }, []);
+
+  const handleSimulationSubmit = useCallback(
+    async (strategyId: string, payload: StrategyConfigUpdatePayload): Promise<SimulationActionResult> => {
+      const token = typeof window !== "undefined" ? localStorage.getItem("accessToken") : null;
+      if (!token) {
+        return { success: false, errorMessage: "Sessão expirada. Faça login novamente." };
+      }
+      try {
+        const response = await setStrategyConfig(token, strategyId, payload);
+        const nextStrategy = response.config;
+        if (nextStrategy) {
+          setSimulationStrategies((prev) => {
+            if (!prev || prev.length === 0) {
+              return [nextStrategy];
+            }
+            const exists = prev.some((item) => item.strategy_id === strategyId);
+            if (exists) {
+              return prev.map((item) =>
+                item.strategy_id === strategyId ? { ...item, ...nextStrategy } : item,
+              );
+            }
+            return [...prev, nextStrategy];
+          });
+        }
+        await Promise.all([loadSimulationPaper(), loadSimulationControl()]);
+        return { success: true, strategy: nextStrategy };
+      } catch (err) {
+        const message =
+          err instanceof Error ? err.message : "Falha ao atualizar configurações da simulação.";
+        return { success: false, errorMessage: message };
+      }
+    },
+    [loadSimulationControl, loadSimulationPaper],
+  );
+
+  const handleSimulationRefresh = useCallback(
+    async (strategyId: string): Promise<SimulationActionResult> => {
+      const token = typeof window !== "undefined" ? localStorage.getItem("accessToken") : null;
+      if (!token) {
+        return { success: false, errorMessage: "Sessão expirada. Faça login novamente." };
+      }
+      try {
+        const control = await fetchControlState(token);
+        setSimulationStrategies(control.strategies ?? []);
+        const found = control.strategies?.find((item) => item.strategy_id === strategyId);
+        await loadSimulationPaper();
+        return { success: true, strategy: found };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Falha ao sincronizar configuração.";
+        return { success: false, errorMessage: message };
+      }
+    },
+    [loadSimulationPaper],
+  );
+
+  const handleSimulationReset = useCallback(async () => {
+    const token = typeof window !== "undefined" ? localStorage.getItem("accessToken") : null;
+    if (!token) {
+      throw new Error("Sessão expirada. Faça login novamente.");
+    }
+    await resetPaperEnvironment(token);
+    await Promise.all([loadSimulationPaper(), loadSimulationControl()]);
+  }, [loadSimulationControl, loadSimulationPaper]);
+
   useEffect(() => {
     const storedUser = localStorage.getItem("username");
     if (storedUser) {
@@ -275,15 +398,18 @@ const [commandHistory, setCommandHistory] = useState<CommandHistoryRecord[]>([])
     }
 
     const storedView = localStorage.getItem("dashboard-active-view") as DashboardView | null;
-    if (storedView && [
-      "dashboard",
-      "strategies",
-      "portfolio",
-      "operations",
-      "metrics",
-      "simulations",
-      "settings",
-    ].includes(storedView)) {
+    if (
+      storedView &&
+      [
+        "dashboard",
+        "strategies",
+        "portfolio",
+        "operations",
+        "simulations",
+        "metrics",
+        "settings",
+      ].includes(storedView)
+    ) {
       setActiveView(storedView);
     }
   }, []);
@@ -351,7 +477,7 @@ const [commandHistory, setCommandHistory] = useState<CommandHistoryRecord[]>([])
           const payload = await portfolioRes.json();
           setPortfolio(normalizePortfolioSnapshot(payload));
         } else {
-          setPortfolio({ positions: [], cash: {} });
+          setPortfolio({ positions: [], cash: {}, cash_history: [] });
           setPortfolioError(await safeError(portfolioRes));
         }
 
@@ -397,7 +523,7 @@ const [commandHistory, setCommandHistory] = useState<CommandHistoryRecord[]>([])
         }
       } catch {
         setPortfolioError("Falha ao contactar o servidor.");
-        setPortfolio({ positions: [], cash: {} });
+        setPortfolio({ positions: [], cash: {}, cash_history: [] });
         setOperationsError("Falha ao contactar o servidor.");
         setControlError("Falha ao contactar o servidor.");
         updateServiceStatuses({
@@ -414,6 +540,14 @@ const [commandHistory, setCommandHistory] = useState<CommandHistoryRecord[]>([])
 
     fetchData();
   }, [initialized, operationsModeFilter, updateServiceStatuses]);
+
+  useEffect(() => {
+    if (activeView !== "simulations") {
+      return;
+    }
+    void loadSimulationControl();
+    void loadSimulationPaper();
+  }, [activeView, loadSimulationControl, loadSimulationPaper]);
 
   useEffect(() => {
     if (!initialized) {
@@ -530,7 +664,7 @@ const [commandHistory, setCommandHistory] = useState<CommandHistoryRecord[]>([])
     if (merged.length === 0 && selectedStrategy.trim().length > 0) {
       merged.push({
         strategy_id: selectedStrategy.trim(),
-        enabled: true,
+        enabled: false,
         mode: "PAPER",
       });
     }
@@ -545,13 +679,6 @@ const [commandHistory, setCommandHistory] = useState<CommandHistoryRecord[]>([])
         : [],
     [operations]
   );
-  const paperOperations = useMemo(
-    () =>
-      Array.isArray(operations)
-        ? operations.filter((op) => op.mode === "PAPER")
-        : [],
-    [operations]
-  );
   const realHistoricalOperations = useMemo(
     () =>
       Array.isArray(historicalOperations)
@@ -559,24 +686,10 @@ const [commandHistory, setCommandHistory] = useState<CommandHistoryRecord[]>([])
         : [],
     [historicalOperations]
   );
-  const paperHistoricalOperations = useMemo(
-    () =>
-      Array.isArray(historicalOperations)
-        ? historicalOperations.filter((op) => op.mode === "PAPER")
-        : [],
-    [historicalOperations]
-  );
   const realPositions = useMemo(
     () =>
       Array.isArray(portfolio.positions)
         ? portfolio.positions.filter((pos) => pos.mode === "REAL")
-        : [],
-    [portfolio.positions]
-  );
-  const paperPositions = useMemo(
-    () =>
-      Array.isArray(portfolio.positions)
-        ? portfolio.positions.filter((pos) => pos.mode === "PAPER")
         : [],
     [portfolio.positions]
   );
@@ -596,6 +709,14 @@ const [commandHistory, setCommandHistory] = useState<CommandHistoryRecord[]>([])
       totalStrategies: strategiesList.length,
     };
   }, [realPositions, realOperations, realCashBalance, controlState, strategiesList]);
+
+  const simulationWorkspaceLoading = simulationControlLoading || simulationPaperLoading;
+  const effectiveSimulationStrategies = useMemo(() => {
+    if (simulationStrategies.length > 0) {
+      return simulationStrategies;
+    }
+    return controlState?.strategies ?? [];
+  }, [simulationStrategies, controlState]);
 
 const botStatusNormalized = (controlState?.bot_status ?? "").toUpperCase();
 const isBotRunning = botStatusNormalized === "RUNNING";
@@ -623,12 +744,6 @@ const selectedStrategyDetails = useMemo(() => {
   const selectedStrategyEnabled = selectedStrategyDetails?.enabled ?? false;
   const selectedStrategyMode = selectedStrategyDetails?.mode ?? "PAPER";
   const hasSelectedStrategy = selectedStrategy.trim().length > 0;
-
-  const advancedStrategy = useMemo(
-    () => controlState?.strategies.find((item) => item.strategy_id === "advanced-alpha-001"),
-    [controlState]
-  );
-  const simulationsError = controlError ?? (!loading && !advancedStrategy ? "Configuração da estratégia avançada não encontrada." : null);
 
   const dashboardPortfolioProps = useMemo(
     () => ({
@@ -841,109 +956,6 @@ const selectedStrategyDetails = useMemo(() => {
     }
   }
 
-  async function fetchAdvancedSimulationConfig(): Promise<SimulationUpdateResult> {
-    const token = localStorage.getItem("accessToken");
-    if (!token) {
-      return { success: false, errorMessage: "Sessão expirada. Faça login novamente." };
-    }
-    try {
-      const control = await fetchControlState(token);
-      const found = control.strategies.find((item) => item.strategy_id === ADVANCED_STRATEGY_ID);
-      const nextStrategy = found ?? defaultAdvancedStrategyState();
-      setControlState((prev) => {
-        const fallbackStatus = prev?.bot_status ?? controlState?.bot_status ?? "UNKNOWN";
-        if (!prev) {
-          return {
-            bot_status: fallbackStatus,
-            strategies: [nextStrategy],
-          };
-        }
-        const exists = prev.strategies.some((item) => item.strategy_id === ADVANCED_STRATEGY_ID);
-        const strategies = exists
-          ? prev.strategies.map((item) =>
-              item.strategy_id === ADVANCED_STRATEGY_ID ? { ...item, ...nextStrategy } : item
-            )
-          : [...prev.strategies, nextStrategy];
-        return { ...prev, strategies };
-      });
-      if (nextStrategy.usd_balance !== undefined) {
-        setPortfolio((prev) => ({
-          positions: Array.isArray(prev.positions) ? prev.positions : [],
-          cash: {
-            ...prev.cash,
-            PAPER: nextStrategy.usd_balance,
-          },
-        }));
-      }
-      return { success: true, strategy: nextStrategy };
-    } catch (err) {
-      return {
-        success: false,
-        errorMessage:
-          err instanceof Error ? err.message : "Falha ao sincronizar configurações de simulação.",
-      };
-    }
-  }
-
-  async function handleSimulationsSubmit(
-    update: StrategyConfigUpdatePayload
-  ): Promise<SimulationUpdateResult> {
-    let persistedStrategy: StrategyState | undefined;
-
-    const result = await sendCommand(
-      async (token) => {
-        const commandResponse = await setStrategyConfig(token, ADVANCED_STRATEGY_ID, update);
-        persistedStrategy = commandResponse.config;
-      },
-      {
-        type: "STRATEGY",
-        action: "SIMULATION_CONFIG",
-        strategyId: ADVANCED_STRATEGY_ID,
-        payload: { ...update },
-      }
-    );
-
-    if (result.success) {
-      const baseStrategy = persistedStrategy ?? advancedStrategy ?? defaultAdvancedStrategyState();
-      const merged = persistedStrategy ?? mergeSimulationUpdate(baseStrategy, update);
-
-      setControlState((prev) => {
-        const fallbackStatus = prev?.bot_status ?? controlState?.bot_status ?? "UNKNOWN";
-        if (!prev) {
-          return {
-            bot_status: fallbackStatus,
-            strategies: [merged],
-          };
-        }
-        const exists = prev.strategies.some((strategy) => strategy.strategy_id === ADVANCED_STRATEGY_ID);
-        const strategies = exists
-          ? prev.strategies.map((strategy) =>
-              strategy.strategy_id === ADVANCED_STRATEGY_ID ? { ...strategy, ...merged } : strategy
-            )
-          : [...prev.strategies, merged];
-        return { ...prev, strategies };
-      });
-
-      if (merged.usd_balance !== undefined) {
-        setPortfolio((prev) => ({
-          positions: Array.isArray(prev.positions) ? prev.positions : [],
-          cash: {
-            ...prev.cash,
-            PAPER: merged.usd_balance,
-          },
-        }));
-      }
-
-      setCommandStatus("Configurações de simulação atualizadas.");
-      return { success: true, strategy: merged };
-    }
-
-    return {
-      success: false,
-      errorMessage: result.errorMessage,
-    };
-  }
-
   async function handleStrategyModeChange(
     strategyId: string,
     mode: "REAL" | "PAPER"
@@ -1077,7 +1089,7 @@ const selectedStrategyDetails = useMemo(() => {
         const payload = await portfolioRes.json();
         setPortfolio(normalizePortfolioSnapshot(payload));
       } else {
-        setPortfolio({ positions: [], cash: {} });
+        setPortfolio({ positions: [], cash: {}, cash_history: [] });
         setPortfolioError(await safeError(portfolioRes));
         success = false;
       }
@@ -1911,22 +1923,13 @@ const selectedStrategyDetails = useMemo(() => {
                   />
                 )}
                 {activeView === "simulations" && (
-                  <SimulationsSection
-                    strategy={advancedStrategy}
-                    paperState={{
-                      cash: portfolio.cash?.PAPER ?? null,
-                      positions: paperPositions,
-                      recentOperations: paperOperations,
-                      historicalOperations: paperHistoricalOperations,
-                      operationsLoading,
-                      operationsError,
-                      historicalLoading,
-                      historicalError,
-                    }}
-                    loading={loading}
-                    error={simulationsError}
-                    onSubmit={handleSimulationsSubmit}
-                    onRefresh={fetchAdvancedSimulationConfig}
+                  <SimulationWorkspace
+                    strategies={effectiveSimulationStrategies}
+                    loading={simulationWorkspaceLoading}
+                    paperState={simulationPaperState}
+                    onSubmit={handleSimulationSubmit}
+                    onRefresh={handleSimulationRefresh}
+                    onResetPaper={handleSimulationReset}
                   />
                 )}
                 {activeView === "metrics" && (

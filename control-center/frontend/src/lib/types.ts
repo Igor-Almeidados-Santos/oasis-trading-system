@@ -12,6 +12,17 @@ export interface PortfolioCash {
 export interface PortfolioSnapshot {
   positions: Position[];
   cash: PortfolioCash;
+  cash_history?: CashHistoryEntry[];
+}
+
+export interface CashHistoryEntry {
+  mode: string;
+  balance: string;
+  delta?: string;
+  symbol?: string;
+  side?: string;
+  client_order_id?: string;
+  timestamp: string;
 }
 
 export interface Operation {
@@ -40,6 +51,10 @@ export interface StrategyState {
   slow_window?: number;
   min_signal_bps?: number;
   position_size_pct?: number;
+  cooldown_seconds?: number;
+  batch_size?: number;
+  batch_interval_minutes?: number;
+  fields?: StrategyField[];
 }
 
 export interface StrategyConfigUpdatePayload {
@@ -53,9 +68,20 @@ export interface StrategyConfigUpdatePayload {
   slow_window?: number;
   min_signal_bps?: number;
   position_size_pct?: number;
+  cooldown_seconds?: number;
+  batch_size?: number;
+  batch_interval_minutes?: number;
 }
 
 export interface ControlState {
   bot_status: string;
   strategies: StrategyState[];
+}
+
+export interface StrategyField {
+  key: string;
+  label: string;
+  type: "boolean" | "mode" | "symbol-list" | "currency" | "integer" | "number" | "percent";
+  helper?: string;
+  options?: string[];
 }

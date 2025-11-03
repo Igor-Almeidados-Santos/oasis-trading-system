@@ -2,10 +2,11 @@ import os
 import asyncio
 import logging
 import json
-from typing import Dict
+from typing import Dict, Any
 import grpc
 from confluent_kafka import Consumer, KafkaError
 from dotenv import load_dotenv
+import redis.asyncio as aioredis
 
 # Imports gerados (com fallback para imports absolutos)
 try:
@@ -23,6 +24,7 @@ except ImportError:  # fallback quando os módulos gerados usam caminhos absolut
 from strategy import Strategy
 from strategies.momentum import SimpleMomentum
 from strategies.advanced_profit import AdvancedProfitStrategy
+from strategies.test_simulator import TestSimulatorStrategy
 
 # Métricas Prometheus (mantém fallback quando o pacote não está disponível)
 try:
@@ -56,6 +58,8 @@ RISK_ENGINE_ADDRESS = os.getenv("RISK_ENGINE_GRPC_ADDR", "localhost:50051")
 METRICS_PORT = int(os.getenv("STRATEGY_METRICS_PORT", 9092))
 FRAMEWORK_KAFKA_CHECK_ATTEMPTS = int(os.getenv("FRAMEWORK_KAFKA_CHECK_ATTEMPTS", "12"))
 FRAMEWORK_KAFKA_CHECK_BACKOFF_MS = int(os.getenv("FRAMEWORK_KAFKA_CHECK_BACKOFF_MS", "5000"))
+REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
+STRATEGY_CONFIG_PREFIX = os.getenv("STRATEGY_CONFIG_KEY_PREFIX", "control:strategy:")
 
 # --- Métricas ---
 TRADES_PROCESSED = Counter("strategy_trades_processed_total", "Total de trades processados", ["symbol"])
@@ -67,13 +71,119 @@ SIGNAL_VALIDATION_RESULT = Counter(
 )
 
 # --- Estado Global do Bot ---
-bot_status = "RUNNING"
+bot_status = "STOPPED"
 active_strategies: Dict[str, Strategy] = {}
+strategy_configs: Dict[str, Dict[str, Any]] = {}
+redis_state_client: aioredis.Redis | None = None
+
+
+async def load_strategy_config(redis_client: aioredis.Redis, strategy_id: str) -> tuple[Dict[str, Any], str] | None:
+    key = f"{STRATEGY_CONFIG_PREFIX}{strategy_id.lower()}"
+    try:
+        raw = await redis_client.get(key)
+    except Exception as err:  # noqa: BLE001
+        log.warning("Falha ao ler config %s: %s", key, err)
+        return None
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+        return payload, key
+    except json.JSONDecodeError as err:
+        log.warning("Config inválida para %s: %s", key, err)
+        return None
+
+
+async def apply_saved_strategy_config(redis_client: aioredis.Redis, strategy: Strategy) -> None:
+    loaded = await load_strategy_config(redis_client, strategy.strategy_id)
+    if loaded is None:
+        strategy.set_enabled(False)
+        strategy_configs.pop(strategy.strategy_id, None)
+        return
+
+    payload, redis_key = loaded
+    strategy_configs[strategy.strategy_id] = dict(payload)
+
+    enabled = payload.get("enabled")
+    mode = payload.get("mode")
+    symbols = payload.get("symbols")
+    usd_balance = payload.get("usd_balance")
+
+    if mode:
+        try:
+            strategy.set_mode(mode)
+        except ValueError:
+            log.warning("Modo inválido em config de %s: %s", strategy.strategy_id, mode)
+
+    if symbols and hasattr(strategy, "set_symbols"):
+        try:
+            strategy.set_symbols(symbols)
+        except Exception as err:  # noqa: BLE001
+            log.warning("Falha ao aplicar símbolos em %s: %s", strategy.strategy_id, err)
+
+    if usd_balance is not None and hasattr(strategy, "set_cash_balance"):
+        try:
+            strategy.set_cash_balance(float(usd_balance))
+        except (TypeError, ValueError):
+            log.warning("usd_balance inválido para %s: %s", strategy.strategy_id, usd_balance)
+
+    parameter_kwargs: Dict[str, Any] = {}
+    if payload.get("take_profit_bps") is not None:
+        try:
+            parameter_kwargs["take_profit"] = float(payload["take_profit_bps"]) / 10_000.0
+        except (TypeError, ValueError):
+            log.warning("take_profit_bps inválido para %s", strategy.strategy_id)
+    if payload.get("stop_loss_bps") is not None:
+        try:
+            parameter_kwargs["stop_loss"] = float(payload["stop_loss_bps"]) / 10_000.0
+        except (TypeError, ValueError):
+            log.warning("stop_loss_bps inválido para %s", strategy.strategy_id)
+    if payload.get("fast_window") is not None:
+        try:
+            parameter_kwargs["fast_window"] = int(payload["fast_window"])
+        except (TypeError, ValueError):
+            log.warning("fast_window inválido para %s", strategy.strategy_id)
+    if payload.get("slow_window") is not None:
+        try:
+            parameter_kwargs["slow_window"] = int(payload["slow_window"])
+        except (TypeError, ValueError):
+            log.warning("slow_window inválido para %s", strategy.strategy_id)
+    if payload.get("min_signal_bps") is not None:
+        try:
+            parameter_kwargs["min_signal_strength"] = float(payload["min_signal_bps"]) / 10_000.0
+        except (TypeError, ValueError):
+            log.warning("min_signal_bps inválido para %s", strategy.strategy_id)
+    if payload.get("position_size_pct") is not None:
+        try:
+            parameter_kwargs["position_size_pct"] = float(payload["position_size_pct"])
+        except (TypeError, ValueError):
+            log.warning("position_size_pct inválido para %s", strategy.strategy_id)
+
+    if parameter_kwargs and hasattr(strategy, "update_parameters"):
+        try:
+            strategy.update_parameters(**parameter_kwargs)
+        except Exception as err:  # noqa: BLE001
+            log.warning("Falha ao aplicar parâmetros em %s: %s", strategy.strategy_id, err)
+
+    # Estratégias nunca iniciam ativas; habilitação deve ser feita via dashboard
+    if enabled and isinstance(enabled, bool):
+        log.info(
+            "Ignorando estado enabled=%s salvo para %s (necessário ativar via dashboard)",
+            enabled,
+            strategy.strategy_id,
+        )
+        payload["enabled"] = False
+        strategy_configs[strategy.strategy_id]["enabled"] = False
+        try:
+            await redis_client.set(redis_key, json.dumps(payload))
+        except Exception as err:  # noqa: BLE001
+            log.warning("Falha ao atualizar estado enabled em %s: %s", redis_key, err)
+    strategy.set_enabled(False)
 
 
 async def consume_control_commands(command_consumer: Consumer) -> None:
     """Processa comandos de controlo recebidos via Kafka."""
-    global bot_status
+    global bot_status, strategy_configs, redis_state_client
 
     log.info("Consumidor de comandos iniciado no tópico '%s'...", CONTROL_COMMAND_TOPIC)
     try:
@@ -116,20 +226,29 @@ async def consume_control_commands(command_consumer: Consumer) -> None:
                     slow_window = payload.get("slow_window")
                     min_signal_bps = payload.get("min_signal_bps")
                     position_size_pct = payload.get("position_size_pct")
+                    cooldown_seconds = payload.get("cooldown_seconds")
+                    batch_size = payload.get("batch_size")
+                    batch_interval_minutes = payload.get("batch_interval_minutes")
 
                     strategy = active_strategies.get(strategy_id)
                     if strategy is None:
                         log.error("[Comandos] Estratégia desconhecida: %s", strategy_id)
                         continue
 
+                    config_entry = strategy_configs.get(strategy_id, {}).copy()
+
                     if enabled is not None:
                         strategy.set_enabled(bool(enabled))
+                        config_entry["enabled"] = bool(enabled)
 
                     if mode is not None:
+                        normalized_mode = str(mode).upper()
                         try:
-                            strategy.set_mode(mode)
+                            strategy.set_mode(normalized_mode)
                         except ValueError:
                             log.error("[Comandos] Modo inválido recebido para '%s': %s", strategy_id, mode)
+                        else:
+                            config_entry["mode"] = normalized_mode
 
                     if symbols is not None and hasattr(strategy, "set_symbols"):
                         try:
@@ -150,6 +269,8 @@ async def consume_control_commands(command_consumer: Consumer) -> None:
                                 strategy_id,
                                 err,
                             )
+                        else:
+                            config_entry["symbols"] = [symbol.upper() for symbol in parsed_symbols]
 
                     if usd_balance is not None and hasattr(strategy, "set_cash_balance"):
                         try:
@@ -160,6 +281,8 @@ async def consume_control_commands(command_consumer: Consumer) -> None:
                                 strategy_id,
                                 usd_balance,
                             )
+                        else:
+                            config_entry["usd_balance"] = str(usd_balance)
 
                     parameter_kwargs = {}
                     if take_profit_bps is not None:
@@ -217,6 +340,35 @@ async def consume_control_commands(command_consumer: Consumer) -> None:
                                 position_size_pct,
                             )
 
+                    if cooldown_seconds is not None:
+                        try:
+                            parameter_kwargs["cooldown_seconds"] = float(cooldown_seconds)
+                        except (TypeError, ValueError):
+                            log.error(
+                                "[Comandos] cooldown_seconds inválido para '%s': %s",
+                                strategy_id,
+                                cooldown_seconds,
+                            )
+                    if batch_size is not None:
+                        try:
+                            parameter_kwargs["batch_size"] = int(batch_size)
+                        except (TypeError, ValueError):
+                            log.error(
+                                "[Comandos] batch_size inválido para '%s': %s",
+                                strategy_id,
+                                batch_size,
+                            )
+                    if batch_interval_minutes is not None:
+                        try:
+                            minutes_val = float(batch_interval_minutes)
+                            parameter_kwargs["batch_interval_seconds"] = minutes_val * 60.0
+                        except (TypeError, ValueError):
+                            log.error(
+                                "[Comandos] batch_interval_minutes inválido para '%s': %s",
+                                strategy_id,
+                                batch_interval_minutes,
+                            )
+
                     if parameter_kwargs and hasattr(strategy, "update_parameters"):
                         try:
                             strategy.update_parameters(**parameter_kwargs)
@@ -226,6 +378,42 @@ async def consume_control_commands(command_consumer: Consumer) -> None:
                                 strategy_id,
                                 err,
                             )
+                        else:
+                            if take_profit_bps is not None:
+                                config_entry["take_profit_bps"] = take_profit_bps
+                            if stop_loss_bps is not None:
+                                config_entry["stop_loss_bps"] = stop_loss_bps
+                            if fast_window is not None:
+                                config_entry["fast_window"] = fast_window
+                            if slow_window is not None:
+                                config_entry["slow_window"] = slow_window
+                            if min_signal_bps is not None:
+                                config_entry["min_signal_bps"] = min_signal_bps
+                            if position_size_pct is not None:
+                                config_entry["position_size_pct"] = position_size_pct
+                            if cooldown_seconds is not None:
+                                config_entry["cooldown_seconds"] = cooldown_seconds
+                            if batch_size is not None:
+                                config_entry["batch_size"] = batch_size
+                            if batch_interval_minutes is not None:
+                                config_entry["batch_interval_minutes"] = batch_interval_minutes
+
+                    strategy_configs[strategy_id] = config_entry
+
+                    if bool(enabled) and hasattr(strategy, "set_cash_balance"):
+                        balance_str = config_entry.get("usd_balance")
+                        if balance_str is None and redis_state_client is not None:
+                            loaded = await load_strategy_config(redis_state_client, strategy_id)
+                            if loaded is not None:
+                                cfg_payload, _ = loaded
+                                balance_str = cfg_payload.get("usd_balance")
+                                config_entry = dict(cfg_payload)
+                                strategy_configs[strategy_id] = config_entry
+                        if balance_str is not None:
+                            try:
+                                strategy.set_cash_balance(float(balance_str))
+                            except (TypeError, ValueError):
+                                log.warning("Valor de saldo inválido ao ativar %s: %s", strategy_id, balance_str)
 
                 else:
                     log.error("[Comandos] Tipo de comando desconhecido: %s", command)
@@ -309,15 +497,23 @@ async def run_market_data_consumer(
 
 
 async def main() -> None:
-    global active_strategies
+    global active_strategies, redis_state_client
 
     # Configura consumidores
     common_conf = {"bootstrap.servers": KAFKA_BROKERS, "group.id": GROUP_ID}
     market_consumer_conf = {**common_conf, "auto.offset.reset": "latest"}
     command_consumer_conf = {**common_conf, "auto.offset.reset": "earliest"}
 
+    global redis_state_client
+
     market_consumer = Consumer(market_consumer_conf)
     command_consumer = Consumer(command_consumer_conf)
+    redis_client: aioredis.Redis | None = None
+    try:
+        redis_client = await aioredis.from_url(REDIS_URL, encoding="utf-8", decode_responses=True)
+        redis_state_client = redis_client
+    except Exception as err:  # noqa: BLE001
+        log.warning("Não foi possível conectar ao Redis (%s). Usando configurações padrão.", err)
 
     # Aguarda disponibilidade dos tópicos (se configurado)
     if not await wait_for_kafka_topic(
@@ -326,6 +522,11 @@ async def main() -> None:
         log.error("Tópico de mercado indisponível. Encerrando inicialização.")
         market_consumer.close()
         command_consumer.close()
+        if redis_client is not None:
+            try:
+                await redis_client.close()
+            except Exception:  # noqa: BLE001
+                pass
         return
 
     if CONTROL_COMMAND_TOPIC:
@@ -346,6 +547,9 @@ async def main() -> None:
 
     # Carrega estratégias iniciais
     strategy = SimpleMomentum(strategy_id="momentum-001", symbol_to_watch=os.getenv("SYMBOL", "BTC-USD"))
+    strategy.set_enabled(False)
+    if redis_client is not None:
+        await apply_saved_strategy_config(redis_client, strategy)
     active_strategies[strategy.strategy_id] = strategy
     log.info("Estratégia '%s' carregada.", strategy.strategy_id)
 
@@ -354,12 +558,13 @@ async def main() -> None:
         for symbol in os.getenv("ADVANCED_STRATEGY_SYMBOLS", "BTC-USD,ETH-USD,SOL-USD").split(",")
         if symbol.strip()
     ]
-    advanced_cash = float(os.getenv("ADVANCED_STRATEGY_CASH", "25000"))
+    advanced_cash = float(os.getenv("ADVANCED_STRATEGY_CASH", "0"))
     advanced_strategy = AdvancedProfitStrategy(
         strategy_id="advanced-alpha-001",
         symbols=advanced_symbols,
         initial_cash=advanced_cash,
     )
+    advanced_strategy.set_enabled(False)
     try:
         take_profit = float(os.getenv("ADVANCED_STRATEGY_TAKE_PROFIT_BPS", "120")) / 10_000.0
         stop_loss = float(os.getenv("ADVANCED_STRATEGY_STOP_LOSS_BPS", "60")) / 10_000.0
@@ -377,11 +582,47 @@ async def main() -> None:
         )
     except Exception as err:  # noqa: BLE001
         log.warning("Não foi possível aplicar parâmetros iniciais da estratégia avançada: %s", err)
+    if redis_client is not None:
+        await apply_saved_strategy_config(redis_client, advanced_strategy)
     active_strategies[advanced_strategy.strategy_id] = advanced_strategy
     log.info(
         "Estratégia '%s' carregada com símbolos %s.",
         advanced_strategy.strategy_id,
         ", ".join(advanced_symbols) or "(nenhum)",
+    )
+
+    test_symbols = [
+        symbol.strip().upper()
+        for symbol in os.getenv("TEST_SIM_STRATEGY_SYMBOLS", "BTC-USD").split(",")
+        if symbol.strip()
+    ]
+    test_cash = float(os.getenv("TEST_SIM_STRATEGY_CASH", "0"))
+    test_strategy = TestSimulatorStrategy(
+        strategy_id="test-simulator-001",
+        symbols=test_symbols,
+        initial_cash=test_cash,
+    )
+    test_strategy.set_enabled(False)
+    try:
+        cooldown_seconds = float(os.getenv("TEST_SIM_STRATEGY_COOLDOWN_SECONDS", "2.0"))
+        position_pct = float(os.getenv("TEST_SIM_STRATEGY_POSITION_SIZE_PCT", "0.5"))
+        batch_size = int(os.getenv("TEST_SIM_STRATEGY_BATCH_SIZE", "10"))
+        batch_interval = float(os.getenv("TEST_SIM_STRATEGY_BATCH_INTERVAL_MINUTES", "10.0")) * 60.0
+        test_strategy.update_parameters(
+            cooldown_seconds=cooldown_seconds,
+            position_size_pct=position_pct,
+            batch_size=batch_size,
+            batch_interval_seconds=batch_interval,
+        )
+    except Exception as err:  # noqa: BLE001
+        log.warning("Não foi possível aplicar parâmetros iniciais da estratégia de teste: %s", err)
+    if redis_client is not None:
+        await apply_saved_strategy_config(redis_client, test_strategy)
+    active_strategies[test_strategy.strategy_id] = test_strategy
+    log.info(
+        "Estratégia '%s' (teste) carregada com símbolos %s.",
+        test_strategy.strategy_id,
+        ", ".join(test_symbols) or "(nenhum)",
     )
 
     # Inicia tarefas
@@ -394,6 +635,12 @@ async def main() -> None:
         log.info("Desligamento solicitado pelo utilizador.")
     finally:
         await channel.close()
+        if redis_client is not None:
+            try:
+                await redis_client.close()
+            except Exception:  # noqa: BLE001
+                pass
+        redis_state_client = None
         log.info("Canal gRPC encerrado.")
 
 

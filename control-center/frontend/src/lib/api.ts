@@ -43,6 +43,7 @@ export function normalizePortfolioSnapshot(data: unknown): PortfolioSnapshot {
     const snapshot = data as {
       positions?: unknown;
       cash?: Record<string, string>;
+      cash_history?: unknown;
     };
     const positions = Array.isArray(snapshot.positions)
       ? (snapshot.positions as PortfolioSnapshot["positions"])
@@ -51,14 +52,17 @@ export function normalizePortfolioSnapshot(data: unknown): PortfolioSnapshot {
       snapshot.cash && typeof snapshot.cash === "object"
         ? snapshot.cash
         : {};
-    return { positions, cash };
+    const cashHistory = Array.isArray(snapshot.cash_history)
+      ? (snapshot.cash_history as PortfolioSnapshot["cash_history"])
+      : [];
+    return { positions, cash, cash_history: cashHistory };
   }
 
   if (Array.isArray(data)) {
-    return { positions: data, cash: {} };
+    return { positions: data, cash: {}, cash_history: [] };
   }
 
-  return { positions: [], cash: {} };
+  return { positions: [], cash: {}, cash_history: [] };
 }
 
 export async function fetchPortfolio(token: string) {
@@ -97,6 +101,12 @@ export async function setStrategyConfig(
       body: JSON.stringify(payload),
     }
   );
+}
+
+export async function resetPaperEnvironment(token: string) {
+  return request<{ message: string }>("/api/v1/paper/reset", token, {
+    method: "POST",
+  });
 }
 
 export async function setBotStatus(
