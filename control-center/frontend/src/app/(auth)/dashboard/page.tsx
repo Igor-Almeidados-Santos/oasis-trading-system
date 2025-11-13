@@ -122,9 +122,10 @@ const formatUsd = (value: number) =>
 
 function mapPortfolioToPaperSnapshot(
   portfolio: PortfolioSnapshot,
-  operations: Operation[],
+  operations: Operation[] | null | undefined,
 ): PaperSimulationSnapshot {
-  const recent = operations.slice(0, 10);
+  const safeOperations = Array.isArray(operations) ? operations : [];
+  const recent = safeOperations.slice(0, 10);
   return {
     cash: portfolio.cash?.PAPER ?? null,
     cashHistory: portfolio.cash_history ?? [],
@@ -132,7 +133,7 @@ function mapPortfolioToPaperSnapshot(
       ? portfolio.positions.filter((position) => position.mode === "PAPER")
       : [],
     recentOperations: recent,
-    historicalOperations: operations,
+    historicalOperations: safeOperations,
     operationsLoading: false,
     operationsError: null,
     historicalLoading: false,
@@ -291,7 +292,7 @@ export default function DashboardPage() {
         fetchOperations(token, { limit: 40, mode: "PAPER" }),
       ]);
       setSimulationPaperState({
-        ...mapPortfolioToPaperSnapshot(portfolioSnapshot, operationsSnapshot),
+        ...mapPortfolioToPaperSnapshot(portfolioSnapshot, operationsSnapshot ?? []),
         operationsLoading: false,
         operationsError: null,
         historicalLoading: false,

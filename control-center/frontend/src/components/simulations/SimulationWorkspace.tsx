@@ -1,6 +1,16 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import {
+  Area,
+  AreaChart,
+  CartesianGrid,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+  type TooltipProps,
+} from "recharts";
 import type {
   CashHistoryEntry,
   Operation,
@@ -57,6 +67,8 @@ export function SimulationWorkspace({
   const [submitting, setSubmitting] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [feedback, setFeedback] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  const [configModalOpen, setConfigModalOpen] = useState(false);
+  const [chartRange, setChartRange] = useState<"DAILY" | "WEEKLY" | "MONTHLY" | "YEARLY">("MONTHLY");
 
   const fields: StrategyField[] = useMemo(() => currentStrategy?.fields ?? [], [currentStrategy]);
 
@@ -141,10 +153,13 @@ export function SimulationWorkspace({
     try {
       const payload = buildPayload(formValues);
       const result = await onSubmit(selectedStrategyId, payload);
-      if (result.success && result.strategy) {
+      if (result.success) {
+        if (result.strategy) {
+          setCurrentStrategy(result.strategy);
+          setFormValues(extractFormValues(result.strategy, result.strategy.fields ?? fields));
+        }
         setFeedback({ type: "success", message: "Configuração atualizada com sucesso." });
-        setCurrentStrategy(result.strategy);
-        setFormValues(extractFormValues(result.strategy, result.strategy.fields ?? fields));
+        setConfigModalOpen(false);
       } else if (result.errorMessage) {
         setFeedback({ type: "error", message: result.errorMessage });
       }
@@ -155,20 +170,6 @@ export function SimulationWorkspace({
       });
     } finally {
       setSubmitting(false);
-    }
-  };
-
-  const handleRefresh = async () => {
-    if (!selectedStrategyId) {
-      return;
-    }
-    const result = await onRefresh(selectedStrategyId);
-    if (result.success && result.strategy) {
-      setCurrentStrategy(result.strategy);
-      setFormValues(extractFormValues(result.strategy, result.strategy.fields ?? fields));
-      setFeedback({ type: "success", message: "Configuração sincronizada." });
-    } else if (!result.success && result.errorMessage) {
-      setFeedback({ type: "error", message: result.errorMessage });
     }
   };
 
@@ -195,11 +196,40 @@ export function SimulationWorkspace({
     }
   };
 
+  const syncCurrentStrategy = async () => {
+    if (!selectedStrategyId) {
+      return;
+    }
+    const result = await onRefresh(selectedStrategyId);
+    if (result.success && result.strategy) {
+      setCurrentStrategy(result.strategy);
+      setFormValues(extractFormValues(result.strategy, result.strategy.fields ?? fields));
+      setFeedback({ type: "success", message: "Configuração sincronizada com sucesso." });
+    } else if (!result.success && result.errorMessage) {
+      setFeedback({ type: "error", message: result.errorMessage });
+    }
+  };
+
+  const closeConfigModal = () => {
+    setConfigModalOpen(false);
+    setFeedback(null);
+  };
+
+  const openConfigModal = () => {
+    setFeedback(null);
+    setConfigModalOpen(true);
+  };
+
   const effectiveLoading = Boolean(loading);
   const positions = paperState?.positions ?? [];
   const recentOperations = paperState?.recentOperations ?? [];
   const historicalOperations = paperState?.historicalOperations ?? [];
-  const cashHistory = paperState?.cashHistory ?? [];
+  const cashHistory = useMemo(() => paperState?.cashHistory ?? [], [paperState?.cashHistory]);
+  const filteredHistory = useMemo(
+    () => filterCashHistoryByRange(cashHistory, chartRange),
+    [cashHistory, chartRange],
+  );
+  const pnlSummary = useMemo(() => summarizePnl(filteredHistory), [filteredHistory]);
 
   return (
     <div className="space-y-6">
@@ -209,49 +239,35 @@ export function SimulationWorkspace({
           <h1 className="text-3xl font-semibold text-slate-900 dark:text-white">
             Ambiente Paper & Estratégias
           </h1>
+          <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">
+            Ative a estratégia em modo PAPER no dashboard principal para gerar sinais com o caixa fictício configurado.
+          </p>
+          <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+            Estratégia atual:{" "}
+            <span className="font-semibold text-slate-900 dark:text-slate-100">
+              {currentStrategy?.strategy_id ?? "nenhuma selecionada"}
+            </span>
+          </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            className="rounded-full border border-slate-300 px-4 py-2 text-sm font-medium text-slate-600 transition hover:border-slate-400 hover:text-slate-900 dark:border-slate-600 dark:text-slate-200 dark:hover:border-slate-500"
+            onClick={openConfigModal}
+            disabled={effectiveLoading || strategies.length === 0}
+          >
+            Configurar simulação
+          </button>
           <button
             type="button"
             className="rounded-full border border-rose-300 px-4 py-2 text-sm font-semibold text-rose-600 transition hover:border-rose-400 hover:text-rose-700 dark:border-rose-400/60 dark:text-rose-200 dark:hover:border-rose-400 dark:hover:text-rose-100"
             onClick={() => void handleResetPaper()}
             disabled={resetting || effectiveLoading}
           >
-            {resetting ? "A limpar..." : "Zerar ambiente paper"}
-          </button>
-          <button
-            type="button"
-            className="rounded-full border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:border-indigo-400 hover:text-indigo-600 dark:border-slate-600 dark:text-slate-200 dark:hover:border-indigo-400 dark:hover:text-indigo-200"
-            onClick={() => void handleRefresh()}
-            disabled={effectiveLoading}
-          >
-            Atualizar configuração
+            {resetting ? "A limpar..." : "Limpar histórico paper"}
           </button>
         </div>
       </header>
-
-      <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm dark:border-slate-700 dark:bg-slate-800">
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">Estratégia</h2>
-            <p className="text-sm text-slate-500 dark:text-slate-400">
-              Selecione qual estratégia deseja simular em modo paper.
-            </p>
-          </div>
-          <select
-            className="rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-700 shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-200 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
-            value={selectedStrategyId}
-            onChange={(event) => void handleSelectStrategy(event.target.value)}
-            disabled={effectiveLoading || strategies.length === 0}
-          >
-            {strategies.map((strategy) => (
-              <option key={strategy.strategy_id} value={strategy.strategy_id}>
-                {strategy.strategy_id}
-              </option>
-            ))}
-          </select>
-        </div>
-      </section>
 
       <section className="grid gap-4 border border-slate-200 bg-white p-6 shadow-sm dark:border-slate-700 dark:bg-slate-800 sm:grid-cols-2 lg:grid-cols-4">
         <SummaryTile label="Caixa (paper)">{summary.cashDisplay}</SummaryTile>
@@ -260,34 +276,76 @@ export function SimulationWorkspace({
         <SummaryTile label="Posições simuladas">{summary.positions}</SummaryTile>
       </section>
 
-      <div className="grid gap-6 lg:grid-cols-3">
-        <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm dark:border-slate-700 dark:bg-slate-800 lg:col-span-2">
-          <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-            <div>
-              <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">
-                Configuração da simulação
-              </h2>
-              <p className="text-sm text-slate-500 dark:text-slate-400">
-                Ajuste parâmetros específicos da estratégia selecionada.
-              </p>
-            </div>
-          </div>
-          {fields.length === 0 ? (
-            <p className="mt-4 text-sm text-slate-500 dark:text-slate-400">
-              Esta estratégia não possui parâmetros configuráveis através da interface.
-            </p>
-          ) : (
-            <form className="mt-4 space-y-4" onSubmit={(event) => void handleSubmit(event)}>
-              <div className="grid gap-4 md:grid-cols-2">
-                {fields.map((field) => (
-                  <FieldInput
-                    key={field.key}
-                    field={field}
-                    value={formValues[field.key]}
-                    onChange={(value) => handleFieldChange(field.key, value)}
-                  />
-                ))}
+      {configModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div
+            className="absolute inset-0 bg-slate-900/70 backdrop-blur-sm"
+            onClick={closeConfigModal}
+          />
+          <div className="relative z-10 w-full max-w-4xl rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl dark:border-slate-700 dark:bg-slate-900">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h2 className="text-xl font-semibold text-slate-900 dark:text-white">
+                  Configurar simulação
+                </h2>
+                <p className="text-sm text-slate-500 dark:text-slate-400">
+                  Escolha a estratégia e ajuste os parâmetros utilizados para gerar sinais em modo paper.
+                </p>
               </div>
+              <button
+                type="button"
+                className="rounded-full border border-slate-200 p-2 text-slate-500 transition hover:border-slate-400 hover:text-slate-700 dark:border-slate-700 dark:text-slate-300 dark:hover:border-slate-500"
+                onClick={closeConfigModal}
+                aria-label="Fechar configuração"
+              >
+                ✕
+              </button>
+            </div>
+            <form className="mt-6 space-y-5" onSubmit={(event) => void handleSubmit(event)}>
+              <div className="space-y-2">
+                <label className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-300">
+                  Estratégia a simular
+                </label>
+                <div className="flex flex-col gap-3 md:flex-row">
+                  <select
+                    className="flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-700 shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-200 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
+                    value={selectedStrategyId}
+                    onChange={(event) => void handleSelectStrategy(event.target.value)}
+                    disabled={effectiveLoading || strategies.length === 0}
+                  >
+                    {strategies.map((strategy) => (
+                      <option key={strategy.strategy_id} value={strategy.strategy_id}>
+                        {strategy.strategy_id}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-600 transition hover:border-indigo-400 hover:text-indigo-600 dark:border-slate-600 dark:text-slate-200 dark:hover:border-indigo-400 dark:hover:text-indigo-200"
+                    onClick={() => void syncCurrentStrategy()}
+                    disabled={effectiveLoading || strategies.length === 0}
+                  >
+                    Sincronizar
+                  </button>
+                </div>
+              </div>
+              {fields.length === 0 ? (
+                <p className="text-sm text-slate-500 dark:text-slate-400">
+                  Esta estratégia não expõe parâmetros editáveis através do painel.
+                </p>
+              ) : (
+                <div className="grid gap-4 md:grid-cols-2">
+                  {fields.map((field) => (
+                    <FieldInput
+                      key={field.key}
+                      field={field}
+                      value={formValues[field.key]}
+                      onChange={(value) => handleFieldChange(field.key, value)}
+                    />
+                  ))}
+                </div>
+              )}
+
               <div className="flex flex-col-reverse gap-3 pt-4 sm:flex-row sm:items-center sm:justify-end">
                 <button
                   type="button"
@@ -300,26 +358,117 @@ export function SimulationWorkspace({
                 >
                   Restaurar valores
                 </button>
-                <button
-                  type="submit"
-                  className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:bg-indigo-300 dark:disabled:bg-indigo-500/40"
-                  disabled={effectiveLoading || submitting}
-                >
-                  {submitting ? "Enviando..." : "Guardar alterações"}
-                </button>
+                <div className="flex gap-3">
+                  <button
+                    type="button"
+                    className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:border-slate-400 hover:text-slate-700 dark:border-slate-600 dark:text-slate-200 dark:hover:border-slate-500 dark:hover:text-white"
+                    onClick={closeConfigModal}
+                    disabled={submitting}
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    type="submit"
+                    className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:bg-indigo-300 dark:disabled:bg-indigo-500/40"
+                    disabled={effectiveLoading || submitting}
+                  >
+                    {submitting ? "Enviando..." : "Guardar alterações"}
+                  </button>
+                </div>
               </div>
             </form>
-          )}
+          </div>
+        </div>
+      )}
+
+      <div className="grid gap-6 lg:grid-cols-3">
+        <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm dark:border-slate-700 dark:bg-slate-800 lg:col-span-2">
+          <div className="flex flex-col gap-3">
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <div>
+                <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">Desempenho</h2>
+                <p className="text-sm text-slate-500 dark:text-slate-400">
+                  Evolução do saldo disponível no ambiente paper.
+                </p>
+              </div>
+              <div className="flex items-center gap-4 text-xs font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
+                <LegendChip color="bg-emerald-400" label="Lucro" value={pnlSummary.gainDisplay} />
+                <LegendChip color="bg-rose-500" label="Perda" value={pnlSummary.lossDisplay} />
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-2 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+              {(["DAILY", "WEEKLY", "MONTHLY", "YEARLY"] as const).map((label) => (
+                <button
+                  key={label}
+                  type="button"
+                  className={`rounded-full px-3 py-1 ${
+                    chartRange === label
+                      ? "bg-slate-900 text-white dark:bg-white dark:text-slate-900"
+                      : "bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400"
+                  }`}
+                  onClick={() => setChartRange(label)}
+                >
+                  {label.toLowerCase().replace(/^\w/, (c) => c.toUpperCase())}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="mt-4 h-52 md:h-60">
+            <PerformanceChart data={normalizeCashHistory(filteredHistory)} />
+          </div>
         </section>
 
         <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm dark:border-slate-700 dark:bg-slate-800">
-          <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">Desempenho</h2>
+          <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">Configuração ativa</h2>
           <p className="text-sm text-slate-500 dark:text-slate-400">
-            Evolução do saldo disponível no modo paper.
+            Resumo do que foi aplicado no laboratório de simulações.
           </p>
-          <div className="mt-4 h-48 md:h-60">
-            <PerformanceChart data={normalizeCashHistory(cashHistory)} />
-          </div>
+          {currentStrategy ? (
+            <dl className="mt-4 space-y-3 text-sm">
+              <div>
+                <dt className="text-slate-500 dark:text-slate-400">Saldo fictício</dt>
+                <dd className="font-semibold text-slate-900 dark:text-slate-100">
+                  {formatUsd(parseCurrency(currentStrategy.usd_balance ?? "0"))}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-slate-500 dark:text-slate-400">Ativos monitorados</dt>
+                <dd className="font-semibold text-slate-900 dark:text-slate-100">
+                  {Array.isArray(currentStrategy.symbols) && currentStrategy.symbols.length > 0
+                    ? currentStrategy.symbols.join(", ")
+                    : "—"}
+                </dd>
+              </div>
+              {typeof currentStrategy.position_size_pct === "number" && (
+                <div>
+                  <dt className="text-slate-500 dark:text-slate-400">% por posição</dt>
+                  <dd className="font-semibold text-slate-900 dark:text-slate-100">
+                    {(currentStrategy.position_size_pct * 100).toFixed(1)}%
+                  </dd>
+                </div>
+              )}
+              {typeof currentStrategy.cooldown_seconds === "number" && (
+                <div>
+                  <dt className="text-slate-500 dark:text-slate-400">Cooldown</dt>
+                  <dd className="font-semibold text-slate-900 dark:text-slate-100">
+                    {currentStrategy.cooldown_seconds}s
+                  </dd>
+                </div>
+              )}
+            </dl>
+          ) : (
+            <p className="mt-4 text-sm text-slate-500 dark:text-slate-400">
+              Carregando parâmetros da estratégia selecionada...
+            </p>
+          )}
+          <button
+            type="button"
+            className="mt-6 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-600 transition hover:border-indigo-400 hover:text-indigo-600 dark:border-slate-600 dark:text-slate-200 dark:hover:border-indigo-400 dark:hover:text-indigo-200"
+            onClick={openConfigModal}
+            disabled={effectiveLoading || strategies.length === 0}
+          >
+            Ajustar parâmetros
+          </button>
         </section>
       </div>
 
@@ -590,24 +739,75 @@ function NumberInput({
 }
 
 type PerformancePoint = {
-  date: Date;
-  balance: number;
+  label: string;
+  online: number;
+  store: number;
 };
+
+function filterCashHistoryByRange(history: CashHistoryEntry[], range: "DAILY" | "WEEKLY" | "MONTHLY" | "YEARLY") {
+  if (!history || history.length === 0) {
+    return [];
+  }
+  const now = new Date();
+  const start = new Date(now);
+  switch (range) {
+    case "DAILY":
+      start.setDate(now.getDate() - 1);
+      break;
+    case "WEEKLY":
+      start.setDate(now.getDate() - 7);
+      break;
+    case "MONTHLY":
+      start.setMonth(now.getMonth() - 1);
+      break;
+    case "YEARLY":
+      start.setFullYear(now.getFullYear() - 1);
+      break;
+    default:
+      break;
+  }
+  return history.filter((entry) => {
+    if (!entry.timestamp) {
+      return false;
+    }
+    const ts = new Date(entry.timestamp);
+    return ts >= start && ts <= now;
+  });
+}
 
 function normalizeCashHistory(history: CashHistoryEntry[]): PerformancePoint[] {
   return history
-    .map((entry) => {
+    .map((entry, index, arr) => {
       const date = entry.timestamp ? new Date(entry.timestamp) : null;
       if (!date || Number.isNaN(date.getTime())) {
         return null;
       }
+      const balance = parseCurrency(entry.balance);
+      if (!Number.isFinite(balance)) {
+        return null;
+      }
+      const previousBalance = index > 0 ? parseCurrency(arr[index - 1]?.balance) : null;
+      const delta = previousBalance != null ? balance - previousBalance : 0;
+      const label = date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
       return {
-        date,
-        balance: parseCurrency(entry.balance),
+        label,
+        online: delta > 0 ? delta : 0,
+        store: delta < 0 ? Math.abs(delta) : 0,
       };
     })
     .filter((item): item is PerformancePoint => item !== null)
-    .sort((a, b) => a.date.getTime() - b.date.getTime());
+    .sort((a, b) => a.label.localeCompare(b.label));
+}
+
+function summarizePnl(data: PerformancePoint[]) {
+  return data.reduce(
+    (acc, point) => {
+      acc.gain += point.online;
+      acc.loss += point.store;
+      return acc;
+    },
+    { gain: 0, loss: 0 },
+  );
 }
 
 function PerformanceChart({ data }: { data: PerformancePoint[] }) {
@@ -619,107 +819,60 @@ function PerformanceChart({ data }: { data: PerformancePoint[] }) {
     );
   }
 
-  const balances = data.map((point) => point.balance);
-  const minBalance = Math.min(...balances);
-  const maxBalance = Math.max(...balances);
-  const range = maxBalance - minBalance || 1;
-
-  const coords = data.map((point, index) => {
-    const x = (index / (data.length - 1)) * 100;
-    const y = 100 - ((point.balance - minBalance) / range) * 100;
-    return { x, y, balance: point.balance };
-  });
-
-  type ChartPoint = typeof coords[number];
-  const pointToString = (point: { x: number; y: number }) => `${point.x.toFixed(2)},${point.y.toFixed(2)}`;
-
-  const initialBalance = data[0].balance;
-  const baselineY = 100 - ((initialBalance - minBalance) / range) * 100;
-
-  const segments: Array<{ color: "positive" | "negative"; path: string }> = [];
-  const addSegment = (color: "positive" | "negative", from: ChartPoint, to: ChartPoint) => {
-    if (Math.abs(from.x - to.x) < 0.0001 && Math.abs(from.y - to.y) < 0.0001) {
-      return;
-    }
-    const move = `M ${pointToString(from)} L ${pointToString(to)}`;
-    const last = segments[segments.length - 1];
-    if (last && last.color === color) {
-      last.path = `${last.path} L ${pointToString(to)}`;
-    } else {
-      segments.push({ color, path: move });
-    }
-  };
-
-  for (let index = 0; index < coords.length - 1; index += 1) {
-    const start = coords[index];
-    const end = coords[index + 1];
-    const startDelta = start.balance - initialBalance;
-    const endDelta = end.balance - initialBalance;
-    const startColor: "positive" | "negative" = startDelta >= 0 ? "positive" : "negative";
-    const endColor: "positive" | "negative" = endDelta >= 0 ? "positive" : "negative";
-
-    if (startColor === endColor) {
-      addSegment(startColor, start, end);
-      continue;
-    }
-
-    const denom = startDelta - endDelta;
-    const ratio = denom === 0 ? 0 : startDelta / denom;
-    const crossX = start.x + (end.x - start.x) * ratio;
-    const crossY = start.y + (end.y - start.y) * ratio;
-    const crossing: ChartPoint = { x: crossX, y: crossY, balance: initialBalance };
-
-    addSegment(startColor, start, crossing);
-    addSegment(endColor, crossing, end);
-  }
-
-  const firstDate = data[0].date.toLocaleString();
-  const lastDate = data[data.length - 1].date.toLocaleString();
-
-  const segmentColor = (color: "positive" | "negative") => (color === "positive" ? "#22c55e" : "#ef4444");
-
   return (
-    <div className="relative h-full w-full">
-      <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="h-full w-full">
-        <rect x="0" y="0" width="100" height="100" fill="rgba(15, 23, 42, 0.05)" />
-        <line
-          x1="0"
-          x2="100"
-          y1={baselineY.toFixed(2)}
-          y2={baselineY.toFixed(2)}
-          stroke="#cbd5f5"
-          strokeWidth={0.6}
-          strokeDasharray="3 2"
-        />
-        {segments.map((segment, index) => (
-          <path
-            key={`line-segment-${index}`}
-            d={segment.path}
-            stroke={segmentColor(segment.color)}
-            strokeWidth={1.8}
-            fill="none"
-            strokeLinecap="round"
+    <div className="relative h-full w-full rounded-2xl bg-gradient-to-b from-slate-900/5 to-slate-100 dark:from-slate-900 dark:to-slate-900/20 p-4 shadow-inner">
+      <ResponsiveContainer width="100%" height="100%">
+        <AreaChart data={data} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+          <defs>
+            <linearGradient id="simOnline" x1="0" x2="0" y1="0" y2="1">
+              <stop offset="0%" stopColor="#c084fc" stopOpacity={0.8} />
+              <stop offset="100%" stopColor="#7c3aed" stopOpacity={0.1} />
+            </linearGradient>
+            <linearGradient id="simStore" x1="0" x2="0" y1="0" y2="1">
+              <stop offset="0%" stopColor="#fdba74" stopOpacity={0.8} />
+              <stop offset="100%" stopColor="#f97316" stopOpacity={0.2} />
+            </linearGradient>
+          </defs>
+          <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+          <XAxis dataKey="label" tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "#94a3b8" }} />
+          <YAxis hide />
+          <Tooltip content={<ChartTooltip />} />
+          <Area
+            type="monotone"
+            dataKey="store"
+            stroke="#fb923c"
+            strokeWidth={2}
+            fill="url(#simStore)"
+            activeDot={{ r: 4 }}
           />
-        ))}
-        {coords.map((point, index) => {
-          const markerColor = point.balance >= initialBalance ? "#22c55e" : "#ef4444";
-          return (
-            <circle
-              key={`chart-point-${index}`}
-              cx={point.x}
-              cy={point.y}
-              r={1.2}
-              fill="#0f172a"
-              stroke={markerColor}
-              strokeWidth={0.7}
-            />
-          );
-        })}
-      </svg>
-      <div className="absolute bottom-0 left-0 right-0 flex justify-between px-2 text-[10px] text-slate-500 dark:text-slate-400">
-        <span>{firstDate}</span>
-        <span>{lastDate}</span>
-      </div>
+          <Area
+            type="monotone"
+            dataKey="online"
+            stroke="#7c3aed"
+            strokeWidth={2}
+            fill="url(#simOnline)"
+            activeDot={{ r: 5 }}
+          />
+        </AreaChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+function ChartTooltip({ active, payload }: TooltipProps<number, string>) {
+  if (!active || !payload || payload.length === 0) {
+    return null;
+  }
+  const datum = payload[0].payload as PerformancePoint;
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-white/95 px-4 py-3 shadow-lg backdrop-blur dark:border-slate-700 dark:bg-slate-900/90">
+      <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">{datum.label}</p>
+      <p className="mt-2 text-sm font-semibold text-slate-900 dark:text-white">
+        Lucro <span className="font-bold text-emerald-500">{formatUsd(datum.online)}</span>
+      </p>
+      <p className="text-xs font-semibold text-slate-500 dark:text-slate-300">
+        Perda <span className="font-bold text-rose-500">{formatUsd(datum.store)}</span>
+      </p>
     </div>
   );
 }
@@ -858,4 +1011,13 @@ function formatUsd(value: number): string {
     currency: "USD",
     maximumFractionDigits: 2,
   }).format(value);
+}
+function LegendChip({ color, label, value }: { color: string; label: string; value: string }) {
+  return (
+    <div className="flex items-center gap-1">
+      <span className={`h-2 w-2 rounded-full ${color}`} />
+      <span>{label}</span>
+      <span className="text-slate-500 dark:text-slate-400">{value}</span>
+    </div>
+  );
 }

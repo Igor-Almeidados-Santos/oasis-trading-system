@@ -1,4 +1,4 @@
-use bigdecimal::BigDecimal;
+use bigdecimal::{BigDecimal, Zero};
 use chrono::Utc;
 use contracts::{
     order_executor_client::OrderExecutorClient,
@@ -36,8 +36,8 @@ fn load_decimal_env(var: &str, default: &str) -> BigDecimal {
 }
 
 lazy_static::lazy_static! {
-    static ref MAX_ORDER_NOTIONAL: BigDecimal = load_decimal_env("RISK_MAX_ORDER_NOTIONAL", "10");
-    static ref MAX_POSITION_NOTIONAL: BigDecimal = load_decimal_env("RISK_MAX_POSITION_NOTIONAL", "5000");
+    static ref MAX_ORDER_NOTIONAL: BigDecimal = load_decimal_env("RISK_MAX_ORDER_NOTIONAL", "100000");
+    static ref MAX_POSITION_NOTIONAL: BigDecimal = load_decimal_env("RISK_MAX_POSITION_NOTIONAL", "1000000");
 }
 
 // Estrutura para armazenar a nossa posição
@@ -70,20 +70,46 @@ impl RiskValidator for RiskValidatorService {
             contracts::TradingMode::try_from(signal.mode).unwrap_or(contracts::TradingMode::Real);
 
         // 1. Criar a Ordem Proposta (ainda com valores placeholder)
-        let order_request = OrderRequest {
+        let price_hint = signal
+            .metadata
+            .get("price")
+            .cloned()
+            .filter(|p| !p.trim().is_empty());
+        let quantity_hint = signal
+            .metadata
+            .get("quantity")
+            .cloned()
+            .filter(|q| !q.trim().is_empty());
+        let order_type_hint = signal
+            .metadata
+            .get("order_type")
+            .cloned()
+            .filter(|t| !t.trim().is_empty());
+
+        let mut order_request = OrderRequest {
             client_order_id: uuid::Uuid::new_v4().to_string(),
             symbol: signal.symbol.clone(),
             side: signal.side.clone(),
-            order_type: "LIMIT".to_string(),
-            quantity: "0.0001".to_string(), // Exemplo: 0.0001 BTC
-            price: "60000.0".to_string(),   // Exemplo: $60,000
+            order_type: order_type_hint.unwrap_or_else(|| "MARKET".to_string()),
+            quantity: quantity_hint.unwrap_or_else(|| "0.0001".to_string()),
+            price: price_hint.unwrap_or_else(|| "60000.0".to_string()),
             strategy_id: signal.strategy_id.clone(),
             mode: signal_mode as i32,
         };
 
         // 2. Validar Limite da Ordem
-        let price = BigDecimal::from_str(&order_request.price).unwrap_or_default();
-        let qty = BigDecimal::from_str(&order_request.quantity).unwrap_or_default();
+        let mut price =
+            BigDecimal::from_str(&order_request.price).unwrap_or_else(|_| BigDecimal::zero());
+        if price <= BigDecimal::zero() {
+            price = BigDecimal::from(60000);
+            order_request.price = "60000.0".to_string();
+        }
+        let mut qty =
+            BigDecimal::from_str(&order_request.quantity).unwrap_or_else(|_| BigDecimal::zero());
+        if qty <= BigDecimal::zero() {
+            qty = BigDecimal::from_str("0.0001").unwrap();
+            order_request.quantity = "0.0001".to_string();
+        }
         let order_notional = &price * &qty; // Valor financeiro da ordem
 
         if order_notional > *MAX_ORDER_NOTIONAL {
@@ -226,7 +252,7 @@ impl RiskValidatorService {
             let _: Result<(), _> = conn.ltrim(history_key, 0, 199).await;
         } else {
             let mut balances = self.cash_balances.lock().await;
-            let mut current_balance = balances
+            let current_balance = balances
                 .entry("PAPER".into())
                 .or_insert_with(|| BigDecimal::from(0));
             *current_balance += delta;

@@ -123,20 +123,20 @@ type SetBotStatusPayload struct {
 }
 
 type StrategyConfig struct {
-	StrategyID      string   `json:"strategy_id"`
-	Enabled         bool     `json:"enabled"`
-	Mode            string   `json:"mode"`
-	Symbols         []string `json:"symbols,omitempty"`
-	UsdBalance      string   `json:"usd_balance,omitempty"`
-	TakeProfitBps   int      `json:"take_profit_bps,omitempty"`
-	StopLossBps     int      `json:"stop_loss_bps,omitempty"`
-	FastWindow      int      `json:"fast_window,omitempty"`
-	SlowWindow      int      `json:"slow_window,omitempty"`
-	MinSignalBps    int      `json:"min_signal_bps,omitempty"`
-	PositionSizePct float64  `json:"position_size_pct,omitempty"`
-	CooldownSeconds float64  `json:"cooldown_seconds,omitempty"`
-	BatchSize       int      `json:"batch_size,omitempty"`
-	BatchIntervalM  float64  `json:"batch_interval_minutes,omitempty"`
+	StrategyID      string          `json:"strategy_id"`
+	Enabled         bool            `json:"enabled"`
+	Mode            string          `json:"mode"`
+	Symbols         []string        `json:"symbols,omitempty"`
+	UsdBalance      string          `json:"usd_balance,omitempty"`
+	TakeProfitBps   int             `json:"take_profit_bps,omitempty"`
+	StopLossBps     int             `json:"stop_loss_bps,omitempty"`
+	FastWindow      int             `json:"fast_window,omitempty"`
+	SlowWindow      int             `json:"slow_window,omitempty"`
+	MinSignalBps    int             `json:"min_signal_bps,omitempty"`
+	PositionSizePct float64         `json:"position_size_pct,omitempty"`
+	CooldownSeconds float64         `json:"cooldown_seconds,omitempty"`
+	BatchSize       int             `json:"batch_size,omitempty"`
+	BatchIntervalM  float64         `json:"batch_interval_minutes,omitempty"`
 	Fields          []StrategyField `json:"fields,omitempty"`
 }
 
@@ -725,6 +725,20 @@ func (h *ApiHandler) resetPaperEnvironment(c *gin.Context) {
 		log.Printf("Erro ao reinicializar saldo paper: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Falha ao reinicializar saldo paper"})
 		return
+	}
+
+	if h.dbPool != nil {
+		if _, err := h.dbPool.Exec(ctx, `
+            WITH staged AS (
+                SELECT id FROM orders WHERE mode = 'PAPER'
+            )
+            DELETE FROM fills
+            WHERE order_id IN (SELECT id FROM staged)`); err != nil {
+			log.Printf("Erro ao limpar fills paper: %v", err)
+		}
+		if _, err := h.dbPool.Exec(ctx, `DELETE FROM orders WHERE mode = 'PAPER'`); err != nil {
+			log.Printf("Erro ao limpar ordens paper: %v", err)
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Ambiente paper reinicializado"})
